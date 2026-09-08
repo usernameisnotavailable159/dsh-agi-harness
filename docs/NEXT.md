@@ -4,13 +4,13 @@
 > 不写口号、不写「优化一下」这类无法判定的条目。
 >
 > 最近核验（写入时实跑）：
-> - 全量测试 `392/392`
-> - 变异审计账本快检：`目标 5 文件 · 变异 29 · 杀死 29 · 幸存 0 · 等价 7 · 杀死率 1`
+> - 全量测试 `451/451`
+> - 变异审计账本快检：`目标 10 文件 · 变异 65 · 杀死 65 · 幸存 0 · 等价 9 · 杀死率 1`
 > - 生产机检：`PRODUCTION CHECK CLEAN`
 
-## P0 · 测量覆盖扩面（当前 5/36 文件）
+## P0 · 测量覆盖扩面（当前 10/36 文件）
 
-**依据**：`scripts/mutation-audit.mjs` 的 `TARGETS` 目前只有 `write-gate / scope / optimal-engine / intent / mode-state` 五个文件，其余 31 个源文件（含 `tools.js`、`gate-core.js`、`run-cmd.js`、`audit-dispatch.js` 等）**没有杀死率读数**——「敢走开」的底账缺一大半。
+**依据**：`scripts/mutation-audit.mjs` 的 `TARGETS` 当前已有 `write-gate / scope / optimal-engine / intent / mode-state / tools / gate-core / run-cmd / rank-organ / pricing-organ` 十个文件，其余源文件（含 `audit-dispatch.js` 等）**仍无杀死率读数**——「敢走开」的底账还可继续扩面。
 
 **做法**：每次挑 1 个模块 → 加入 `TARGETS`（映射**只收沙箱自包含测试**：不 import 插件入口 `index.js`，否则审计沙箱基线必红）→ 跑审计 → 幸存变异逐条处置（补断言杀死，或入 `scripts/equivalents.json` 带机械理由）。
 
@@ -20,7 +20,7 @@
 
 ## P0 · 弱杀检测（white-box 测试的游戏口）
 
-**依据**：杀死率只统计「测试是否变红」，不区分「红是因为断言了行为」还是「红是因为断言了实现细节」（例如断言某函数返回值的字符串格式、或断言内部调用次数）。当前 29 个变异全部「被杀」，但**没有任何机制证明这些断言是语义断言**。
+**依据**：杀死率只统计「测试是否变红」，不区分「红是因为断言了行为」还是「红是因为断言了实现细节」（例如断言某函数返回值的字符串格式、或断言内部调用次数）。当前 65 个变异全部「被杀」，但**没有任何机制证明这些断言是语义断言**。
 
 **做法**（候选）：对每个杀死某变异的测试，抽取其断言表达式，标记出「只断言 truthy/长度/不抛错」的弱断言；弱断言比例进入账本。
 
@@ -37,9 +37,9 @@
 
 **验证**：每条修完补对应单测（先写「旧实现误判」的实证用例，再写新行为）。
 
-## P1 · 测量覆盖扩面（当前 6/36 文件）
+## P1 · 测量覆盖扩面（当前 10/36 文件）
 
-**依据**：`scripts/mutation-audit.mjs` 的 `TARGETS` 现为 `write-gate / scope / optimal-engine / intent / mode-state / tools / gate-core / run-cmd`。下一批候选：`rank-organ.js`、`pricing-organ.js`（本轮新逻辑 `isExternalRollback`/`countsTowardRework` 已自包含可测）、`audit-dispatch.js`、`judge.js`。
+**依据**：`scripts/mutation-audit.mjs` 的 `TARGETS` 现为 `write-gate / scope / optimal-engine / intent / mode-state / tools / gate-core / run-cmd / rank-organ / pricing-organ`。下一批候选：`audit-dispatch.js`、`judge.js`、`contract-merge.js` 等。
 
 **做法**：加目标 → 跑审计 → 幸存变异逐条处置（补断言或入 `equivalents.json` 带机械理由）。**映射只收沙箱自包含测试**（不 import 插件入口 `index.js`）。
 

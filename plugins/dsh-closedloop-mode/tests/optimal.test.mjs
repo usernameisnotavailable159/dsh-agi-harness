@@ -330,7 +330,9 @@ test('r71 刀三 师傅层：同型基线+偏差反馈（just-in-time 校准，�
 
 test('r72 v0.6.34 锚点净化：read: 带括注/反斜杠 不再误拒（P3-3）', async () => {
   const eng = await import('../src/optimal-engine.js')
-  const r = eng.checkPredictionSources('t', [{ key: 'k', value: '1', source: 'read:D:/dsh/dsh-closedloop-mode/package.json（本轮 read 实测原文）' }])
+  const anchor = join(TMP, 'anchor.txt')
+  writeFileSync(anchor, '第一行\n')
+  const r = eng.checkPredictionSources('t', [{ key: 'k', value: '1', source: 'read:' + anchor + '#L1（本轮 read 实测原文）' }])
   assert.equal(r.ok, true, '括注净化后过（P3-3 案底：括注污染=文件不存在误拒）')
   const r2 = eng.checkPredictionSources('t', [{ key: 'k', value: '1', source: 'read:C:\\dsh\\不存在\\x.mjs' }])
   assert.equal(r2.ok, false)

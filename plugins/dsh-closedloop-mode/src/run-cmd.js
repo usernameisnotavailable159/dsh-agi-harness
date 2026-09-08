@@ -53,7 +53,7 @@ export function classifyFailure(ex) {
     return { state: ex.clazz, err: String(ex?.stderr || ex?.message || '').split('\n')[0].slice(0, 120) }
   }
   const code = String(ex?.code || '')
-  if (code === 'ENOENT') return { state: 'broken', err: 'ENOENT：可执行不存在（结构信号·零文案依赖）' }
+  if (code === 'ENOENT' || code === 'EACCES') return { state: 'broken', err: (code === 'ENOENT' ? 'ENOENT：可执行不存在（结构信号·零文案依赖）' : 'EACCES：可执行无权限/不可执行（结构信号·零文案依赖）') }
   if (code === 'ETIMEDOUT' || ex?.killed || /ETIMEDOUT/.test(String(ex?.message || ''))) return { state: 'broken', err: '超时（结构信号）' }
   const errText = String(ex?.stderr || ex?.message || '')
   if (/Cannot find module|MODULE_NOT_FOUND|did not match any files/.test(errText)) {

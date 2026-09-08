@@ -24,7 +24,7 @@ test('r2 不存在的可执行 → ENOENT 结构分类 broken（零文案依赖�
   try { execCmdSync('no-such-exe-xyz-abc --version', { timeout: 5000 }) } catch (e) {
     const c = classifyFailure(e)
     assert.equal(c.state, 'broken')
-    assert.match(c.err, /ENOENT/)
+    assert.match(c.err, /ENOENT|EACCES/)
   }
 })
 

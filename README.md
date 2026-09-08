@@ -43,7 +43,21 @@
 cd plugins/dsh-closedloop-mode && node --test tests/
 ```
 
-## 更新说明\n\n见 [CHANGELOG.md](CHANGELOG.md)。\n\n## 许可
+## 构建（TypeScript 插件）
+
+仓库内的 `dsh-browser-panel` 与 `dsh-engram-relay` 提供自包含构建配置，可从源码重新生成 `lib/`：
+
+```bash
+cd plugins/dsh-browser-panel && npm install --ignore-scripts && npm run build
+cd plugins/dsh-engram-relay && npm install --ignore-scripts --legacy-peer-deps && npm run prepare
+```
+
+
+## 更新说明
+
+见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 许可
 
 Apache-2.0（见 LICENSE，全文 verbatim）。
 

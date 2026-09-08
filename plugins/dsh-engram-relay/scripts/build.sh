@@ -155,13 +155,13 @@ fi
 echo "=== 编译 host（tsc $("$TSC" --version)）==="
 "$TSC" -p tsconfig.json
 
-# ═══ 4. client bundle（tsdown；devDep，npm install 后存在）═══
+# ═══ 4. Self-contained host+client bundle (tsdown direct from src) ═══
 TSDOWN="node_modules/.bin/tsdown"
 if [ -e "$TSDOWN" ]; then
-  echo "=== 构建 client bundle（tsdown）==="
-  "$TSDOWN"
+  echo "=== 构建 host + client bundle（tsdown --config tsdown.config.mjs）==="
+  "$TSDOWN" --config tsdown.config.mjs
 else
-  echo "build: 未找到 tsdown——client bundle 未构建（npm install 后重试）" >&2
+  echo "build: 未找到 tsdown——先 npm install（tsdown 是 devDependency）" >&2
   exit 1
 fi
 

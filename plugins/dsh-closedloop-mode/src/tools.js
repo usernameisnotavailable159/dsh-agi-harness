@@ -343,7 +343,7 @@ export function costSetDefinition({ name = 'cost_set' } = {}) {
         } catch (ex) {
           // Windows 经 cmd 跑不存在的命令=exit1+stderr"not recognized"——以此辨"跑不了"（报错）vs"跑了红"（可挂）
           const errText = String(ex?.stderr || ex?.message || '')
-          if (/not recognized|不是内部或外部命令|ETIMEDOUT|ENOENT/.test(errText)) cmdErr.push(`[${i}] ${errText.slice(0, 60)}（tips：①路径实测勿猜仓根 ②ESM import 要 file:///）`)
+          if (/not recognized|不是内部或外部命令|ETIMEDOUT|ENOENT|EACCES/.test(errText)) cmdErr.push(`[${i}] ${errText.slice(0, 60)}（tips：①路径实测勿猜仓根 ②ESM import 要 file:///）`)
           else { try { const z2 = zOf(mm, parseOutput(mm, String(ex?.stdout ?? ''), 1)); if (z2 >= 1 && !String(a.rationale || '').trim()) noDisc.push(i) } catch { /* exit红=有判别力，放行 */ } }
         }
       }

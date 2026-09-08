@@ -2,8 +2,7 @@
 
 [English](README.en.md) | **中文**
 
-> DeepSeek Harness 内测生态 · 仅限 dsh-external 组织内测成员使用
-> ⚠️ 严禁公开、外发、镜像或分发到任何非授权位置；仓库必须保持 PRIVATE
+> DeepSeek Harness 开源生态插件 · Apache-2.0
 
 ## 🌟 北极星（North Star）
 
@@ -47,7 +46,7 @@
 
 - 独立仓库，只含插件本身；零 SDK 依赖（服务接口自声明，运行时由宿主 Harness 提供）
 - 已打 `marisa-plugin` topic（Marisa 面板 + hub plugins.json 自动收录）
-- 遵循 dsh-external 内测保密规则；仓库必须保持 PRIVATE
+- 作为 dsh-agi-harness 开源仓库的一部分发布，遵循 Apache-2.0
 
 ## 状态
 

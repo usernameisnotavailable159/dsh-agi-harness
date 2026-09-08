@@ -37,8 +37,8 @@
     "build": "node scripts/check-routes.mjs && tsc -p tsconfig.json && tsdown -c tsdown.config.mjs",
     "check": "node scripts/check-routes.mjs && tsc -p tsconfig.json --noEmit --pretty false",
     "test": "vitest run",
-    "prepack": "pnpm run build",
-    "prepare": "pnpm run build"
+    "prepack": "npm run build",
+    "prepare": "node scripts/prepare.mjs"
   },
   "license": "Apache-2.0",
   "dependencies": {

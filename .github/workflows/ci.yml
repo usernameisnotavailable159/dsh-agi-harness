@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  closedloop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install
+        working-directory: plugins/dsh-closedloop-mode
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Tests
+        working-directory: plugins/dsh-closedloop-mode
+        run: node --test "tests/*.test.mjs"
+
+  browser-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install
+        working-directory: plugins/dsh-browser-panel
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Build
+        working-directory: plugins/dsh-browser-panel
+        run: npm run build
+      - name: Tests
+        working-directory: plugins/dsh-browser-panel
+        run: npm test
+
+  engram-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install
+        working-directory: plugins/dsh-engram-relay
+        run: npm install --ignore-scripts --legacy-peer-deps --no-audit --no-fund
+      - name: Build (self-contained prepare path)
+        working-directory: plugins/dsh-engram-relay
+        run: npm run prepare
+      - name: Tests
+        working-directory: plugins/dsh-engram-relay
+        run: npm test
