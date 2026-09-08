@@ -26,7 +26,7 @@ function profileDirForHost(sessionId) {
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'browser-panel';
 /** Services required by this plugin. */
-export const inject = ['httpServer', 'tools'];
+export const inject = ['webServer', 'tools'];
 export const Config = z.object({
     toolTimeoutMs: z.number().default(60_000),
     snapshotMaxChars: z.number().default(12_000),
@@ -92,7 +92,7 @@ export function apply(ctx, config) {
     });
     /** 路由注册挂 effect：热重载/卸载时自动注销（否则旧 fiber 路由残留导致 duplicate route）。 */
     const registerRoute = (route) => {
-        ctx.effect(() => ctx.httpServer.register(route), 'browser-panel:route');
+        ctx.effect(() => ctx.webServer.register(route), 'browser-panel:route');
     };
     registerRoute({
         kind: 'exact',
