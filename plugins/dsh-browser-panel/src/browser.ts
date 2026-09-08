@@ -17,7 +17,18 @@
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { chromium, type Browser, type BrowserContext, type CDPSession, type ConsoleMessage, type Dialog, type Download, type Page } from 'playwright-core'
+import type { Browser, BrowserContext, CDPSession, ConsoleMessage, Dialog, Download, Page } from 'playwright-core'
+
+let chromiumLoader: Promise<typeof import('playwright-core').chromium> | null = null
+
+/** Lazy-load Playwright so unsupported platforms (e.g. Android) can still
+ *  load the plugin itself; only browser_* tool calls fail with a clear error. */
+async function getChromium(): Promise<typeof import('playwright-core').chromium> {
+  if (!chromiumLoader) {
+    chromiumLoader = import('playwright-core').then((m) => m.chromium)
+  }
+  return chromiumLoader
+}
 
 /** One console message captured from a page. */
 export interface ConsoleEntry {
@@ -155,6 +166,7 @@ export class BrowserSession {
    */
   async open(profileDir?: string): Promise<void> {
     if (this.isOpen) return
+    const chromium = await getChromium()
     // 绕过一切代理：chromium 在 Windows 会继承系统代理（注册表，如 127.0.0.1:7892），
     // 本机代理常未运行 → ERR_PROXY_CONNECTION_FAILED。实测 --no-proxy-server 无效
     // （系统代理仍被继承），必须用 --proxy-server=direct:// 显式覆盖为直连。

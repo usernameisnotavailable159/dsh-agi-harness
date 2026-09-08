@@ -2,8 +2,7 @@ import z from "schemastery";
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { chromium } from "playwright-core";
-//#region lib/types/browser.js
+//#region src/browser.ts
 /**
 * Per-session headed-browser lifecycle: one persistent Playwright Chromium
 * context per owner session, created lazily on first use and destroyed with
@@ -19,6 +18,13 @@ import { chromium } from "playwright-core";
 * the CDP screencast always feeds the active tab.
 * @module @dsh-external/dsh-browser-panel/browser
 */
+let chromiumLoader = null;
+/** Lazy-load Playwright so unsupported platforms (e.g. Android) can still
+*  load the plugin itself; only browser_* tool calls fail with a clear error. */
+async function getChromium() {
+	if (!chromiumLoader) chromiumLoader = import("playwright-core").then((m) => m.chromium);
+	return chromiumLoader;
+}
 /** One owned browser instance. Not thread-safe; owner serializes calls. */
 var BrowserSession = class BrowserSession {
 	browser;
@@ -119,6 +125,7 @@ var BrowserSession = class BrowserSession {
 	*/
 	async open(profileDir) {
 		if (this.isOpen) return;
+		const chromium = await getChromium();
 		const noProxyArgs = ["--proxy-server=direct://"];
 		const cleanEnv = {};
 		for (const [key, value] of Object.entries(process.env)) {
@@ -279,13 +286,7 @@ var BrowserSession = class BrowserSession {
 /** Default persistent profile root shared across sessions. */
 const PROFILE_ROOT = join(homedir(), ".dsh", "browser-panel", "profiles");
 //#endregion
-//#region lib/types/snapshot.js
-/**
-* Non-multimodal page observation: serialize the page's interactive elements
-* into a numbered, text-only inventory the model reads directly. Screenshots
-* never enter model context; the snapshot IS the model's eyes.
-* @module @dsh-external/dsh-browser-panel/snapshot
-*/
+//#region src/snapshot.ts
 /** Element inventory script run inside the page. */
 const COLLECT_SCRIPT = () => {
 	const SELECTORS = [
@@ -442,12 +443,7 @@ async function collectSnapshot(page, maxItems) {
 	};
 }
 //#endregion
-//#region lib/types/protocol.js
-/**
-* Wire vocabulary shared by the host half, the model-facing tools, and the
-* client panel: snapshot shape, tool result shapes, and panel route constants.
-* @module @dsh-external/dsh-browser-panel/protocol
-*/
+//#region src/protocol.ts
 /** Rendered form of a snapshot: header + numbered interactive inventory. */
 const renderSnapshot = (snapshot, maxChars) => {
 	const lines = [
@@ -469,14 +465,7 @@ const PANEL_ROUTE = "/browser-panel";
 /** WebSocket upgrade path for the live frame stream. */
 const PANEL_STREAM_PATH = "/browser-panel/stream";
 //#endregion
-//#region lib/types/actions.js
-/**
-* Atomic page actions: execute a model-chosen primitive against an element
-* addressed by snapshot index. Indexes are re-issued by every snapshot; a
-* stale index fails with the current snapshot so the model retries from
-* evidence instead of guessing.
-* @module @dsh-external/dsh-browser-panel/actions
-*/
+//#region src/actions.ts
 /** Failure carrying the fresh snapshot so callers can retry from evidence. */
 var StaleIndexError = class extends Error {
 	snapshotText;
@@ -549,18 +538,7 @@ async function waitStable(page) {
 	await page.waitForTimeout(300);
 }
 //#endregion
-//#region lib/types/vision.js
-/**
-* Optional vision bridge: describe a live browser frame through an
-* OpenAI-compatible vision-language model (VLM). Purely opt-in — enabled only
-* when the plugin config provides a `vision` endpoint. The model remains
-* text-only by default; this tool is the explicit escape hatch the North Star
-* calls "optional VLM bridge" (screenshots selectively enter model context).
-*
-* Zero SDK dependency: speaks the standard Chat Completions wire format over
-* the built-in `fetch`.
-* @module @dsh-external/dsh-browser-panel/vision
-*/
+//#region src/vision.ts
 /** Render an error as a stable string without leaking credentials. */
 function describeError(error) {
 	if (error instanceof Error) return error.message;
@@ -614,7 +592,7 @@ async function describeFrame(page, options, prompt) {
 	return content.trim();
 }
 //#endregion
-//#region lib/types/tools.js
+//#region src/tools.ts
 /**
 * Model-facing browser tools over the per-session headed browser. The whole
 * surface is text-only by design (DeepSeek models have no vision):
@@ -689,8 +667,7 @@ function ownerSessionId(exec) {
 }
 /** Sanitize a session id into a safe profile directory name. */
 function profileDirFor(sessionId) {
-	const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-	return `${PROFILE_ROOT}/${safe}`;
+	return `${PROFILE_ROOT}/${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 /**
 * Register the browser tools on `ctx.tools`, all backed by one registry.
@@ -767,8 +744,7 @@ function defineTools(registry, options) {
 			},
 			output: TEXT_OUTPUT,
 			async execute(args, exec) {
-				const session = await sessionFor(exec);
-				return { text: await snapshotText(session, exec, args.delta === true) };
+				return { text: await snapshotText(await sessionFor(exec), exec, args.delta === true) };
 			}
 		},
 		{
@@ -1179,19 +1155,7 @@ function defineTools(registry, options) {
 	];
 }
 //#endregion
-//#region lib/types/screencast.js
-/**
-* CDP screencast pump: streams JPEG frames from the browser's page to a
-* per-session frame cache the panel polls over HTTP. Frames are human-visible
-* only — they never enter model context.
-*
-* Headless Chromium only serves screencast frames for the foreground target,
-* so exactly one subscription is active at a time: tab switches stop the old
-* page's screencast and start the new active page's (via the session's
-* per-page CDP session cache). `bringToFront` in the session keeps the newly
-* active page compositing so frames flow again.
-* @module @dsh-external/dsh-browser-panel/screencast
-*/
+//#region src/screencast.ts
 /** Retains the latest screencast frame per session. */
 var FrameCache = class {
 	frames = /* @__PURE__ */ new Map();
@@ -1325,15 +1289,7 @@ var ScreencastPump = class {
 	}
 };
 //#endregion
-//#region lib/types/pick.js
-/**
-* Front-end-dev picking: locate an element under a normalized viewport
-* coordinate and extract a stable CSS selector plus the key computed styles,
-* so the panel can offer "add this element's CSS to the conversation".
-* Coordinates are normalized (0..1 fractions of the viewport) so the client
-* never needs to know the frame or viewport pixel sizes.
-* @module @dsh-external/dsh-browser-panel/pick
-*/
+//#region src/pick.ts
 /** Run inside the page: locate element at normalized coordinates and describe it. */
 const PICK_SCRIPT = ({ xRatio, yRatio }) => {
 	const x = Math.round(xRatio * window.innerWidth);
@@ -1488,24 +1444,10 @@ function renderCssBlock(extraction) {
 	return lines.join("\n");
 }
 //#endregion
-//#region lib/types/index.js
-/**
-* `@dsh-external/dsh-browser-panel`: WebUI-embedded headed browser for the
-* model and the user. The host half owns one Playwright Chromium per owner
-* session, registers the text-only `browser_*` tool set (non-multimodal
-* control: numbered accessibility-style snapshots, index addressing, atomic
-* actions), and serves a per-session JPEG frame cache the client panel polls
-* for the live view. Screenshots are human-visible only and never enter model
-* context.
-*
-* Standalone repo convention: no SDK dependency; the minimal service
-* interfaces below are supplied by the host Harness at runtime.
-* @module @dsh-external/dsh-browser-panel
-*/
+//#region src/index.ts
 /** Persistent profile dir for a host-opened session. */
 function profileDirForHost(sessionId) {
-	const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-	return join(PROFILE_ROOT, safe);
+	return join(PROFILE_ROOT, sessionId.replace(/[^a-zA-Z0-9_-]/g, "_"));
 }
 /** Cordis plugin name used by loader diagnostics. */
 const name = "browser-panel";
