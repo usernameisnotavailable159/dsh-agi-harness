@@ -1,6 +1,7 @@
 import z from "schemastery";
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 //#region src/browser.ts
 /**
@@ -22,7 +23,12 @@ let chromiumLoader = null;
 /** Lazy-load Playwright so unsupported platforms (e.g. Android) can still
 *  load the plugin itself; only browser_* tool calls fail with a clear error. */
 async function getChromium() {
-	if (!chromiumLoader) chromiumLoader = import("playwright-core").then((m) => m.chromium);
+	if (!chromiumLoader) chromiumLoader = (async () => {
+		if (process.platform === "android") try {
+			Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+		} catch {}
+		return import("playwright-core").then((m) => m.chromium);
+	})();
 	return chromiumLoader;
 }
 /** One owned browser instance. Not thread-safe; owner serializes calls. */
@@ -126,16 +132,24 @@ var BrowserSession = class BrowserSession {
 	async open(profileDir) {
 		if (this.isOpen) return;
 		const chromium = await getChromium();
-		const noProxyArgs = ["--proxy-server=direct://"];
-		const cleanEnv = {};
+		const noProxyArgs = ["--proxy-server=direct://", "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"];
+		const tmpDir = join(homedir(), ".dsh", "browser-panel", "tmp");
+		await mkdir(tmpDir, { recursive: true, mode: 448 }).catch(() => {});
+		const cleanEnv = {
+			TMPDIR: tmpDir,
+			XDG_RUNTIME_DIR: tmpDir
+		};
 		for (const [key, value] of Object.entries(process.env)) {
 			if (/^(http|https|all|no)_proxy$/i.test(key)) continue;
 			if (value !== void 0) cleanEnv[key] = value;
 		}
+		const chromiumPath = process.env.BROWSER_PANEL_CHROMIUM_PATH || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || join(process.env.PREFIX || "/data/data/com.termux/files/usr", "lib", "chromium", "chrome");
+		const executablePath = existsSync(chromiumPath) ? chromiumPath : void 0;
 		if (profileDir !== void 0) {
 			await mkdir(profileDir, { recursive: true });
 			this.context = await chromium.launchPersistentContext(profileDir, {
 				headless: true,
+				executablePath,
 				viewport: {
 					width: 1280,
 					height: 800
@@ -149,6 +163,7 @@ var BrowserSession = class BrowserSession {
 		} else {
 			this.browser = await chromium.launch({
 				headless: true,
+				executablePath,
 				args: noProxyArgs,
 				env: cleanEnv
 			});

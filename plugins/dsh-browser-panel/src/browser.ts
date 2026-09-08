@@ -15,6 +15,7 @@
  */
 
 import { mkdir } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type { Browser, BrowserContext, CDPSession, ConsoleMessage, Dialog, Download, Page } from 'playwright-core'
@@ -25,7 +26,16 @@ let chromiumLoader: Promise<typeof import('playwright-core').chromium> | null = 
  *  load the plugin itself; only browser_* tool calls fail with a clear error. */
 async function getChromium(): Promise<typeof import('playwright-core').chromium> {
   if (!chromiumLoader) {
-    chromiumLoader = import('playwright-core').then((m) => m.chromium)
+    chromiumLoader = (async () => {
+      // Android/Termux: playwright-core 的 registry 只认 linux/darwin/win32，
+      // 但 Termux Chromium 是 Linux 构建。这里在动态 import 前把 platform
+      // 映射为 linux，插件其余部分仍可正常使用；不改动全局平台时 Playwright
+      // 会直接 throw "Unsupported platform: android"。
+      if (process.platform === 'android') {
+        try { Object.defineProperty(process, 'platform', { value: 'linux', configurable: true }) } catch { /* keep android */ }
+      }
+      return import('playwright-core').then((m) => m.chromium)
+    })()
   }
   return chromiumLoader
 }
@@ -170,16 +180,33 @@ export class BrowserSession {
     // 绕过一切代理：chromium 在 Windows 会继承系统代理（注册表，如 127.0.0.1:7892），
     // 本机代理常未运行 → ERR_PROXY_CONNECTION_FAILED。实测 --no-proxy-server 无效
     // （系统代理仍被继承），必须用 --proxy-server=direct:// 显式覆盖为直连。
-    const noProxyArgs = ['--proxy-server=direct://']
-    const cleanEnv: Record<string, string> = {}
+    // Android/Termux Chromium 需要显式关闭 sandbox，并避免 /dev/shm 限制。
+    const noProxyArgs = [
+      '--proxy-server=direct://',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+    ]
+    // Chromium ProcessSingleton 会在 TMPDIR 下创建 Unix socket；Termux 默认
+    // $PREFIX/tmp 在部分 ROM 上不可用，这里固定到可写的插件私有目录。
+    const tmpDir = join(homedir(), '.dsh', 'browser-panel', 'tmp')
+    await mkdir(tmpDir, { recursive: true, mode: 0o700 }).catch(() => {})
+    const cleanEnv: Record<string, string> = { TMPDIR: tmpDir, XDG_RUNTIME_DIR: tmpDir }
     for (const [key, value] of Object.entries(process.env)) {
       if (/^(http|https|all|no)_proxy$/i.test(key)) continue
       if (value !== undefined) cleanEnv[key] = value
     }
+    // Termux 自带 Chromium：$PREFIX/lib/chromium/chrome。也支持用环境变量覆盖。
+    const chromiumPath = process.env.BROWSER_PANEL_CHROMIUM_PATH
+      || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+      || join(process.env.PREFIX || '/data/data/com.termux/files/usr', 'lib', 'chromium', 'chrome')
+    const executablePath = existsSync(chromiumPath) ? chromiumPath : undefined
     if (profileDir !== undefined) {
       await mkdir(profileDir, { recursive: true })
       this.context = await chromium.launchPersistentContext(profileDir, {
         headless: true,
+        executablePath,
         viewport: { width: 1280, height: 800 },
         args: noProxyArgs,
         env: cleanEnv,
@@ -190,7 +217,7 @@ export class BrowserSession {
       this.pages = this.context.pages()
       this.activeIndex = 0
     } else {
-      this.browser = await chromium.launch({ headless: true, args: noProxyArgs, env: cleanEnv })
+      this.browser = await chromium.launch({ headless: true, executablePath, args: noProxyArgs, env: cleanEnv })
       this.context = await this.browser.newContext({ viewport: { width: 1280, height: 800 }, acceptDownloads: true })
       this.pages = [await this.context.newPage()]
       this.activeIndex = 0
