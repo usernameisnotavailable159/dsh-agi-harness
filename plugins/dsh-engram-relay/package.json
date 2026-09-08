@@ -29,7 +29,6 @@
   },
   "dependencies": {
     "@huggingface/transformers": "3.6.3",
-    "onnxruntime-node": "1.20.1",
     "schemastery": "^3.18.0"
   },
   "dsh": {
@@ -89,7 +88,7 @@
     "@deepseek-ai/dsh-llm": "0.0.1-rc.1",
     "@deepseek-ai/dsh-system-prompt": "0.0.1-rc.1",
     "@deepseek-ai/dsh-tools": "0.0.1-rc.1",
-    "cordis": "^4.0.2"
+    "cordis": "^4.0.0-rc.9"
   },
   "scripts": {
     "build": "bash scripts/build.sh",
@@ -101,5 +100,8 @@
     "sim:1m": "node tests/simulate-1m.mjs",
     "sim:causal": "node tests/simulate-causal.mjs",
     "verify": "node scripts/verify.mjs"
+  },
+  "optionalDependencies": {
+    "onnxruntime-node": "1.20.1"
   }
 }
