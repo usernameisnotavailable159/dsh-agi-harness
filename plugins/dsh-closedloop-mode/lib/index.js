@@ -41,10 +41,10 @@ import { createHash } from 'node:crypto'
 import {
   initMode, loadState, saveState, serializeState, STAGE_SEMANTICS, controlSurface, treeText,
   trigger, deactivate, loadConceptLimit, loadVerifyMode, onWeightsConfirmed, onWeightsUnlock,
-  stateFileFor, stateDirFor, readAutoConfirm,
+  stateFileFor, stateDirFor, readAutoConfirm, recordWrite,
 } from './mode-state.js'
 import { loadStack, stackTop, vLadderOf, optimalDir } from './optimal-engine.js'
-import { gateWrite } from './write-gate.js'
+import { gateWrite, WRITE_TOOLS } from './write-gate.js'
 import { noteFriction } from './friction-organ.js'
 import { onWriteGateDeny, onWriteGateAllow } from './gate-wiring.js'
 import { gateAmbientLine, PHASE_FOCUS } from './gate-ambient.js'
@@ -52,7 +52,7 @@ import { lqrReadout } from './lqr-organ.js'
 import { getModelFingerprint } from './gate-core.js'
 import { PERSONA } from './persona.js'
 import { claim, release } from './quota-organ.js'
-import { presetAllowed, effectiveScopeConfig, writeScopeFile, setLiveScope, validateScopeValue, listPresets, SCOPE_NS } from './scope.js'
+import { presetAllowed, effectiveScopeConfig, writeScopeFile, setLiveScope, validateScopeValue, listPresets, createScopeMirror, SCOPE_NS } from './scope.js'
 import { stateFace, weightsFace, stepReminder, batchConfirmLine } from './propose-text.js'
 import { offReceipt, VERSION } from './inject-text.js'
 import {
@@ -186,11 +186,19 @@ export function apply(ctx, config) {
   // 卡片派发规则（官方源码注释实证）：宿主不服务该命名空间 → 卡片永不显示，故 installSection 必需。
   try {
     const ScopeSchema = z.object({ disabled: z.array(z.string()).default([]) })
+    // v0.8.29 装载护栏（案底：用户「选完退出又全选」）：installSection 装载时会同步调一次
+    // onChange（dsh-settings lib/index.js:338），此刻宿主解析值还是基值——直接镜像就把
+    // 活值文件刷成「全选」，而 effectiveScopeConfig 文件优先 → 重启即全选。
+    // 故：装载期 onHostChange() 返回 null 不动文件，installSection 返回后 arm() 才放行真实变更。
+    const scopeMirror = createScopeMirror()
     ctx.settings.installSection(ctx, SCOPE_NS, ScopeSchema, { disabled: Array.isArray(config.disabled) ? config.disabled : [] }, {
       setSource: (source) => setLiveScope(source),
       validate: (v) => validateScopeValue(v),
-      onChange: () => {},
+      // v0.8.28：卡片写入后把宿主活值镜像进活值文件——否则「文件优先」会把新值盖回旧值
+      // （案底：onChange 空函数 → 拨完又变全选、看起来没保存）。
+      onChange: () => scopeMirror.onHostChange(),
     })
+    scopeMirror.arm()
   } catch (e) { console.warn('[closedloop] 作用域节注册失败（开关回退文件/配置层）:', String(e?.message || e).slice(0, 80)) }
   const offArmed = new Map() // off 双确认窗口（v0.3.1⑥：单条命令误触不清账）
   function backupPersisted(sid) {
@@ -262,7 +270,12 @@ export function apply(ctx, config) {
           if (String(req.method || 'GET').toUpperCase() === 'POST') {
             let body = ''
             for await (const ch of req) body += ch
-            send({ ok: true, ...writeScopeFile(JSON.parse(body || '{}')) })
+            // v0.8.29 双写：文件是作用域的行为真源（本地同步落盘），宿主 settings 节
+            // 是给设置页/其它界面看的镜像。只写文件会让宿主节留旧值——下次卡片拨动
+            // 镜像回来的还是旧值，两源分叉（案底：选完退出又全选）。
+            const saved = writeScopeFile(JSON.parse(body || '{}'))
+            try { await ctx.settings.update(SCOPE_NS, { disabled: saved.disabled }) } catch { /* 宿主节不可写不阻断：文件已落盘 */ }
+            send({ ok: true, ...saved })
           } else {
             send({ ok: true, presets: listPresets(), ...effectiveScopeConfig({ disabled: [] }) })
           }
@@ -369,9 +382,10 @@ export function apply(ctx, config) {
             const sid = exec?.agent?.session?.id
             if (!sid) return undefined
             if (!presetAllowed(exec?.agent?.session, effectiveScopeConfig(config))) return undefined // v0.8.7 预设作用域外=插件静默（不闸不注）
+            const st = loadState(sid)
             const reason = gateWrite({
               toolName: exec.name,
-              state: loadState(sid),
+              state: st,
               hasOpenStep: stackTop(loadStack(sid))?.status === 'open',
               hasHumanTurn: humanTurnSids.has(sid),
               autoStartDisabled: config.autoStart === false,
@@ -380,6 +394,12 @@ export function apply(ctx, config) {
               try { noteFriction(sid, 'write-gate', reason) } catch { /* 记账失败不打断 */ }
               try { onWriteGateDeny({ tool: exec.name, reason: reason.slice(0, 60) }) } catch { /* 闸记录失败不影响拦截 */ }
             } else {
+              // v0.8.30 写入面台账：放行的 write/edit 记进 state.writeSet——判据可证伪门的数据源
+              // （门要拿"本会话产出"做负对照；没有台账就无从知道哪些文件是被审者的笔迹）。
+              try {
+                const fp = exec?.arguments?.file_path
+                if (st && WRITE_TOOLS.includes(exec.name) && fp) saveState(sid, recordWrite(st, String(fp)))
+              } catch { /* 台账失败不阻断写入 */ }
               try { onWriteGateAllow({ tool: exec.name }) } catch { /* 闸记录失败不影响放行 */ }
             }
             return reason

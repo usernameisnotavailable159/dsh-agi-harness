@@ -27,6 +27,7 @@ import { EngramWakeEngine } from './engram/wake.js';
 import { RelayModel } from './model/relay-model.js';
 import { installGraphApi } from './graph-api.js';
 import { LingshuSupervisor } from './lingshu-supervisor.js';
+import { decideInjection, alreadyPresent, skipReasonText } from './inject-guard.js';
 import { VerifyCache } from './verify-cache.js';
 import { ENGRAM_LAYERS } from './engram/store.js';
 import { appendFileSync } from 'node:fs';
@@ -337,7 +338,7 @@ export class EngramRelay {
                 try {
                     const mh = await this.wake.query(condition, 1, {
                         sessionId: this.currentSessionId ?? undefined,
-                        cwd: this.currentCwd ?? undefined,
+                        cwd: this.resolveViewerCwd(this.currentSessionId ?? undefined),
                     });
                     if (mh.engrams.length > 0) {
                         const e = mh.engrams[0];
@@ -407,12 +408,16 @@ export class EngramRelay {
                 // 融合：每次 API 调度前都注入（不限于主对话轮）——sessionId 可缺省
                 // （后台/子任务/工具内推理），viewer 无会话时 isVisible 只放行 global 层。
                 const sessionId = options.sessionId ?? '';
-                // 分层准入需要查看者视角：sessionId + 当前工作目录（cwd 经 turn-stopping 追踪）
+                // 分层准入需要查看者视角：sessionId + 该会话自己的工作目录。
+                // ⚠️ 不能直接用全局 currentCwd：进程级单字段，多会话并发时后写者
+                // 覆盖先写者，会把另一会话的 project 层记忆按错误 cwd 过滤。
+                // 改为按 sessionId 解析，currentCwd 仅兜底（见 resolveViewerCwd）。
+                const viewerCwd = this.resolveViewerCwd(sessionId || undefined);
                 const _t0 = Date.now();
-                const wakeP = this.wake.maybeWake(sessionId, options, { cwd: this.currentCwd ?? undefined, turn: this.lastTurnAt }).then((h) => {
+                const wakeP = this.wake.maybeWake(sessionId, options, { cwd: viewerCwd, turn: this.lastTurnAt }).then((h) => {
                     if (h) {
                         // v0.4.0 性能观测：唤醒耗时入 distill-debug.log（p50/p95 收敛数据源）
-                        this.debugLog(`wake ${h.reason}${h.pressure ? ' [pressure]' : ''} items=${h.engrams.length} took=${Date.now() - _t0}ms`);
+                        this.debugLog(`wake ${h.reason}${h.pressure ? ' [pressure]' : ''} items=${h.engrams.length} cwd=${viewerCwd ?? 'none'} took=${Date.now() - _t0}ms`);
                     }
                     return h;
                 }).catch((error) => {
@@ -434,21 +439,55 @@ export class EngramRelay {
                     await wakeReady;
                     try {
                         const injection = self.renderMemorySection();
-                        if (injection) {
-                            const messages = options.messages;
-                            if (Array.isArray(messages)) {
-                                ;
-                                messages.push({ role: 'system', content: injection });
-                            }
+                        // issue #14：注入必须走 DSH 的消息契约（决策收在 inject-guard，纯函数可测）——
+                        // ① content 是 ContentBlock[]（字符串会被 dsh-llm 的 contentHasImage 打成
+                        //    "content.some is not a function"：/compact 必崩）；
+                        // ② 辅助调用（compaction/session-title）跳过——摘要指令必须是最后一条消息；
+                        // ③ 正常轮次请求被 agent-loop deepFreeze——本轮不注，交给 agent/pre-step。
+                        const d = decideInjection(options, injection);
+                        if (d.action === 'inject' && d.message) {
+                            ;
+                            options.messages.push(d.message);
+                        }
+                        else if (d.why && d.why !== 'no-injection' && d.why !== 'already-present') {
+                            self.noteInjectionSkip(skipReasonText(d.why));
                         }
                     }
                     catch (error) {
-                        self.ctx.logger?.warn?.('[engram-relay] injection failed: %s', String(error));
+                        self.noteInjectionFailure(error);
                     }
                     yield* next();
                 })();
             }
             return next();
+        }));
+        // 1.5 issue #14 路线 2：正常轮次走 `agent/pre-step` 正规接缝注入。
+        //     为什么不能只靠 llm/stream：轮次请求被 agent-loop deepFreeze，就地改必抛，
+        //     而异常被吞=静默失效（这就是"每轮记忆注入"长期不生效的真因）。
+        //     pre-step 的 decision.messages 可变、且作为 durable user/message 落盘——
+        //     与 DSH 自己的 "Current runtime context" 同一机制（不碰冻结请求、不破前缀缓存）。
+        //     去重：与 llm/stream 路径共用 alreadyPresent（同一记忆段不重复注入）。
+        this.disposers.push(this.ctx.on('agent/pre-step', async (_payload, next) => {
+            const decision = await next();
+            try {
+                if (!this.config.enabled)
+                    return decision;
+                if (!decision || decision.kind === 'reject')
+                    return decision;
+                const msgs = decision.messages;
+                if (!Array.isArray(msgs))
+                    return decision;
+                const injection = this.renderMemorySection();
+                if (!injection)
+                    return decision;
+                if (alreadyPresent(msgs.slice(-3), injection))
+                    return decision;
+                return { ...decision, messages: [...msgs, { role: 'user', content: [{ type: 'text', text: injection }] }] };
+            }
+            catch (error) {
+                this.noteInjectionFailure(error);
+                return decision;
+            }
         }));
         // 2. 记忆能力说明（固定文本，零动态：system 稳定 → 前缀缓存保持命中）。
         //    动态召回内容走消息尾注入（上方），需要时也可用 engram_recall 工具。
@@ -536,6 +575,25 @@ export class EngramRelay {
             // 融合自愈清理：只停自己拉起的灵枢进程（手动实例绝不动）
             this.supervisor.dispose();
         };
+    }
+    /** 注入被跳过：首次显式留痕——issue #14 最贵的部分是「静默」，不是崩溃。 */
+    injectionSkipLogged = false;
+    noteInjectionSkip(why) {
+        if (this.injectionSkipLogged)
+            return;
+        this.injectionSkipLogged = true;
+        this.ctx.logger?.warn?.('[engram-relay] injection skipped（只记一次）: %s', why);
+    }
+    /** 注入失败：首次升 error 并计数，之后按次数 warn——不再把异常降级成静默。 */
+    injectionFailCount = 0;
+    noteInjectionFailure(error) {
+        this.injectionFailCount += 1;
+        if (this.injectionFailCount === 1) {
+            this.ctx.logger?.error?.('[engram-relay] injection failed (first, 后续按次计数): %s', String(error));
+        }
+        else {
+            this.ctx.logger?.warn?.('[engram-relay] injection failed ×%d: %s', this.injectionFailCount, String(error));
+        }
     }
     renderMemorySection() {
         // engram 文本注入（哈希唤醒）
@@ -743,6 +801,32 @@ export class EngramRelay {
     lastTurnAt = 0;
     /** 当前工作目录（分层准入：project 层按 cwd 过滤；turn-stopping 持续追踪）。 */
     currentCwd = null;
+    /**
+     * 解析查看者工作目录（分层准入中 project 层的边界）。
+     *
+     * 优先按会话解析：agents 服务 → 该会话 header.cwd（与图谱 API
+     * graph-api.ts:resolveViewer 同一口径）；再回退到最近一次 turn-stopping
+     * 捕获的 currentCwd；最后回退到 store 里最近写入的 project 层节点所属
+     * 项目（热重载后 currentCwd 尚未捕获时的兜底）。
+     *
+     * ⚠️ 不能只用 currentCwd：它是进程级单字段，任何会话的 turn-stopping
+     * 都会覆盖它（下方写入处），多会话并发时后写者赢——拿它当每个会话的
+     * viewer.cwd 会让另一会话的 project 层记忆被错误过滤（表现为 wake
+     * items=0）。
+     */
+    resolveViewerCwd(sessionId) {
+        if (sessionId) {
+            const agents = this.ctx.get('agents');
+            const cwd = agents?.get?.(sessionId)?.session?.header?.cwd;
+            if (typeof cwd === 'string' && cwd !== '')
+                return cwd;
+        }
+        if (this.currentCwd)
+            return this.currentCwd;
+        const recent = this.store.query({ layer: 'project', limit: 1, recent: true });
+        const fallback = recent[0]?.projectId;
+        return typeof fallback === 'string' && fallback !== '' ? fallback : undefined;
+    }
     /**
      * 供工具使用的唤醒查询入口。
      * @param viewer - 查看者视角（分层准入：{ sessionId, cwd }）。

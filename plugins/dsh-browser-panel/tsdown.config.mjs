@@ -1,48 +1,57 @@
-/**
- * Self-contained build for @dsh-external/dsh-browser-panel.
- *
- * This file intentionally does not depend on a DSH source checkout: it uses
- * tsdown to transpile TS directly, so `npm run build` / `prepare` work from a
- * clean git install. Runtime host dependencies (schemastery, playwright-core)
- * and browser platform modules (react) are left external and resolved by DSH
- * or the package manager.
- */
+// tsdown.config.mjs — browser-panel 构建配置（2026-09 重建：原配置缺失）。
+// host（index + invariant）：esm/node bundle，externals 走 package.json deps 自动外置。
+// client：cjs/browser bundle，按注入器脚手架权威模板（SCAFFOLD_TSDOWN）产 lib/client.js，
+//   banner/footer/intro 组成 __ModuleLoader__.load({ id }) 包装，id 必须等于 package.json name。
+import { fileURLToPath } from 'node:url'
+
 const PLUGIN_ID = '@dsh-external/dsh-browser-panel'
 
-/** Node half externals: host dependencies supplied by the installed package. */
-const NODE_EXTERNALS = ['schemastery', 'playwright-core']
-
-/** Browser modules provided by the Web UI loader/application. */
-const CLIENT_EXTERNALS = ['react']
-
-export default [
-  {
-    // Host half: lib/index.js (plugin entry) + lib/invariant.js.
-    entry: { index: 'src/index.ts', invariant: 'src/invariant.ts' },
-    outDir: 'lib',
-    format: ['esm'],
-    platform: 'node',
-    target: 'es2024',
-    fixedExtension: false,
-    dts: false,
-    clean: false,
-    external: NODE_EXTERNALS,
-  },
-  {
-    // Browser half: lib/client.js, served by DSH at /plugins/<id>/client.js.
-    entry: { client: 'src/client/index.ts' },
-    outDir: 'lib',
-    format: 'cjs',
-    platform: 'browser',
-    target: 'es2024',
-    dts: false,
-    clean: false,
-    external: CLIENT_EXTERNALS,
-    outputOptions: {
-      entryFileNames: 'client.js',
-      banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PLUGIN_ID)}, factory: (require) => {`,
-      footer: 'return module.exports; } });',
-      intro: 'var module = { exports: {} }; var exports = module.exports;',
-    },
-  },
+const CLIENT_EXTERNALS = [
+  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
+  'cordis',
+  '@deepseek-ai/dsh-client-ui-slots',
+  '@deepseek-ai/dsh-client-runtime/client',
 ]
+
+const hostBundle = {
+  entry: {
+    index: 'src/index.ts',
+    invariant: 'src/invariant.ts',
+  },
+  outDir: 'lib',
+  format: 'esm',
+  platform: 'node',
+  dts: false,
+  sourcemap: false,
+  clean: false,
+  outputOptions: {
+    // 强落 .js：package.json type=module 下 .js 即 esm；exports 映射指向 ./lib/index.js
+    entryFileNames: '[name].js',
+  },
+}
+
+const clientBundle = {
+  entry: { client: 'src/client/index.ts' },
+  outDir: 'lib',
+  format: 'cjs',
+  platform: 'browser',
+  dts: false,
+  sourcemap: true,
+  clean: false,
+  define: {
+    'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
+  },
+  deps: {
+    neverBundle: [...CLIENT_EXTERNALS],
+    alwaysBundle: (id) => !CLIENT_EXTERNALS.includes(id),
+  },
+  outputOptions: {
+    entryFileNames: 'client.js',
+    banner: 'window.__ModuleLoader__.load({ id: ' + JSON.stringify(PLUGIN_ID) + ', factory: (require) => {',
+    footer: 'return module.exports; } });',
+    intro: 'var module = { exports: {} }; var exports = module.exports;',
+    codeSplitting: false,
+  },
+}
+
+export default [hostBundle, clientBundle]

@@ -14,7 +14,7 @@
 import {
   initMode, loadState, saveState, SEVERITIES, trigger,
   onCostCommit, onGroupsEdit, onWeightsFreeze, onWeightsConfirmed, onWeightsUnlock, recordClosed, markGroupSettled,
-  controlSurface, terminalCheck, treeText, allGroupsSettled, readAutoConfirm,
+  controlSurface, terminalCheck, treeText, allGroupsSettled, readAutoConfirm, recordIOU, payIOU, openIOU,
 } from './mode-state.js'
 import { declareStep, convergeStep, rollbackStep, loadStack, stackText, stackTop, optimalFileFor, optimalDir, loadProbes, saveProbes, settleDirtyTail, baselineLine, deviationLine, agreedMatch } from './optimal-engine.js'
 import { getJudge } from './judge.js'
@@ -32,9 +32,13 @@ import { loadPricing, savePricing, recordSession, shadowC, evaluateSwitch, obser
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync, execFileSync, spawn } from 'node:child_process'
-import { execCmdSync, classifyFailure } from './run-cmd.js'
+import { homedir } from 'node:os'
+import { execCmdSync, execCmdAsync, classifyFailure } from './run-cmd.js'
 import { onDeclareSuccess, onDeclareReject, onConvergeSuccess, onConvergeReject, onTerminalZero, onProbeSuccess, onProbeReject, onRollback } from './gate-wiring.js'
 import { recordLesson, lessonSummary } from './learning-organ.js'
+import { claimKey, recordDebts, escalateDebts, dischargeDebts, refuseGuess, debtLine, isEvidential, sourceKind, cheapestRepay } from './debt-ledger.js'
+import { dispositionLine, recordTrust, trustSummary } from './trust-ledger.js'
+import { runFalsifyGate, CONTROLS_FULL, falsifyKey } from './falsify.js'
 import { recordAbility, abilitySummary, readAbilities } from './ability-organ.js'
 import { bindActualAction, buildTaskState, recordBoundOutcome } from './task-value-core.js'
 import { getModelFingerprint } from './gate-core.js'
@@ -119,10 +123,34 @@ export function normAcceptItem(x) {
 /** v0.8.6 会话工作区 cwd（判据/探针/测量命令的基准）：exec.agent.session.cwd 优先，宿主 cwd 兜底。
  *  v0.8.14 回退链（实测案底 probe-cwd-001：本部署 exec.agent.session.cwd 为空 → 判据/探针全部落在
  *  宿主 cwd C:\Users\Administrator，相对路径判据必红——v0.8.6 承诺「相对路径按会话工作区解析」未兑现）：
- *  env DSH_SESSION_CWD/DSH_AGENT_CWD → 从 DSH_SESSION_JSONL 目录名解码（--D-dsh-- → D:/dsh）→ 宿主 cwd。 */
-export const sessionCwd = (exec) => {
+ *  v0.8.33（issue #15）：① 新增 env DSH_CLOSEDLOOP_CWD 显式覆盖（最高优先）；
+ *  env DSH_SESSION_CWD/DSH_AGENT_CWD → 从 DSH_SESSION_JSONL 目录名解码（--D-dsh-- → D:/dsh）
+ *  → workspaceFromSessionId（DSH_HOME 缺失时按 dshHome() 反推）→ 宿主 cwd。 */
+export const sessionCwd = (exec, env = process.env) => {
   const c = String(exec?.agent?.session?.cwd || '').trim()
-  return c || decodeSessionCwd() || workspaceFromSessionId(exec?.agent?.session?.id) || process.cwd()
+  if (c) return c
+  // v0.8.33 显式覆盖（issue #15 建议 4）：工作区根 ≠ 工程根时，调用方可以直接指定基准目录
+  const override = String(env?.DSH_CLOSEDLOOP_CWD || '').trim()
+  if (override && existsSync(override)) return override
+  // v0.8.21 实测案底（非 ASCII 工作区 /4.1flash大战fable5.1/月球撞击地球）：段解码未还原 ~XXXX 转义
+  // → cwd 指向不存在路径 → 所有 execFile 直接 ENOENT（判据 dry-run/探针全线「跑不了」，非「判据红」）。
+  // 双保险：解码已补转义还原（见 decodeWorkspaceSegment），此处再加存在性闸，坏候选逐级弃用。
+  for (const cand of [decodeSessionCwd(env), workspaceFromSessionId(exec?.agent?.session?.id, env)]) {
+    if (cand && existsSync(cand)) return cand
+  }
+  return process.cwd()
+}
+
+/** DSH_HOME 解析（v0.8.33 issue #15）：宿主进程里 DSH_HOME 常常不存在（DSH_SESSION_* 只注入
+ *  命令子进程）→ ① env.DSH_HOME ② 从 DSH_SESSION_JSONL 的 …/sessions/<seg>/ 反推父目录
+ *  ③ ~/.dsh 兜底。返回空串=无法确定。 */
+export function dshHome(env = process.env) {
+  const explicit = String(env?.DSH_HOME || '').trim()
+  if (explicit) return explicit
+  const p = String(env?.DSH_SESSION_JSONL || '').trim()
+  const m = p.match(/[\\/]sessions[\\/]/)
+  if (m && m.index > 0) return p.slice(0, m.index)
+  try { return join(homedir(), '.dsh') } catch { return '' }
 }
 
 /** 工作区目录段解码（纯函数可测）：'--D-dsh--' → 'D:/dsh'；非编码段=空串。 */
@@ -130,7 +158,9 @@ export function decodeWorkspaceSegment(seg) {
   const s = String(seg || '')
   if (!s.startsWith('--') || !s.endsWith('--') || s.length <= 4) return ''
   const inner = s.slice(2, -2)
-  return inner.replace(/^([A-Za-z])-/, '$1:/').split('-').join('/')
+  const raw = inner.replace(/^([A-Za-z])-/, '$1:/').split('-').join('/')
+  // v0.8.21：目录段对非 ASCII 用 ~XXXX（4 位十六进制码点）转义，旧实现不还原 → 解码出死路径。
+  return raw.replace(/~([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
 }
 
 /** 会话工作区解码（纯函数可测）：env 显式值优先；否则从 DSH_SESSION_JSONL 的 sessions/<seg>/ 段还原。 */
@@ -149,7 +179,7 @@ export function decodeSessionCwd(env = process.env) {
  *  找不到=空串（调用方兜底）。 */
 export function workspaceFromSessionId(sid, env = process.env) {
   const id = String(sid || '').trim()
-  const home = String(env?.DSH_HOME || '').trim()
+  const home = dshHome(env)
   if (!id || !home) return ''
   const base = join(home, 'sessions')
   try {
@@ -248,8 +278,68 @@ export async function extractSigns(exec) {
   try { const ms = await exec?.agent?.session?.deriveMessages?.(); return collectUserSigns(ms) } catch { return new Set() }
 }
 
-export function trySettleGroups(s, steps, userSigns, cwd = process.cwd()) {
+/** v0.8.30 判据执行器（三态）：负对照门与组落账共用同一分类器——同命令同分类。
+ *  v0.8.32 改异步（卡死修复）：用 execCmdAsync（spawn/事件环）而不是 execFileSync——
+ *  同步执行器在工具调用里跑会把整个宿主停摆（用户实测：重判据一次落账卡死几分钟）。
+ *  负对照（control=true）另有更短超时：判据在假货上跑 20s 还没完，本身就该判「跑不了」。 */
+export function judgeRunner(cwd = process.cwd(), opts = {}) {
+  const realMs = judgeTimeoutMs()
+  const controlMs = Math.min(realMs, Number(opts.controlMs) || 20000)
+  return async (cmd, meta = {}) => {
+    try { await execCmdAsync(cmd, { timeout: meta.control ? controlMs : realMs, cwd }); return 'green' }
+    catch (e) {
+      const k = classifyCmdError(e)
+      return k.state === 'green' ? 'green' : k.state === 'red' ? 'red' : 'broken' // broken/pending（跑不了）= 未判定
+    }
+  }
+}
+
+/** v0.8.32 负对照结果记忆（会话级）：键=判据 + 产物指纹（路径/大小/mtime）。
+ *  为什么：同一判据在一次会话里会被反复落账（每步 closeGroup），不记忆就每次重跑 3 条负对照
+ *  ——重判据上这是数分钟的重复阻塞。产物一变（指纹变）自动失效重跑。 */
+const FALSIFY_MEMO = new Map()
+
+/**
+ * v0.8.30 判据可证伪门（合同期早警 + 组落账门共用）：对每条 cmd 判据跑负对照。
+ * 不变量：判据必须能对假货说不。字面壳/空转壳仍绿 ⇒ vacuous ⇒ block。
+ * 无产物（no-artifact）不拦（判据目标尚未创建或与写入面无关），只记 detail 供审计。
+ * @returns {Promise<{block:boolean, notes:string[], details:object[]}>}
+ */
+export async function falsifyBlock(accept, args = {}) {
+  const cwd = String(args.cwd || process.cwd())
+  const writeSet = Array.isArray(args.writeSet) ? args.writeSet : []
+  const run = typeof args.run === 'function' ? args.run : judgeRunner(cwd)
   const notes = []
+  const details = []
+  for (const x of (Array.isArray(accept) ? accept : [])) {
+    if (!String(x).startsWith('cmd:')) continue
+    let cmd
+    try { cmd = parseAcceptCmd(String(x)) } catch { continue }
+    let gate
+    const key = falsifyKey(cmd, { writeSet, cwd })
+    const memo = FALSIFY_MEMO.get(key)
+    if (memo) gate = { ...memo, cached: true }
+    else {
+      try { gate = await runFalsifyGate({ cmd, writeSet, cwd, run, controls: CONTROLS_FULL }) }
+      catch (e) {
+        details.push({ cmd, verdict: 'unproven', reason: String(e?.message || e).slice(0, 120) })
+        continue
+      }
+      FALSIFY_MEMO.set(key, { verdict: gate.verdict, reason: gate.reason, controls: gate.controls, artifacts: gate.artifacts })
+      if (FALSIFY_MEMO.size > 200) FALSIFY_MEMO.delete(FALSIFY_MEMO.keys().next().value) // 上限：最旧的先淘汰
+    }
+    details.push({ cmd, verdict: gate.verdict, reason: gate.reason, artifacts: gate.artifacts.length, cached: gate.cached === true })
+    if (gate.verdict === 'vacuous') {
+      notes.push(`判据空转（负对照仍绿）：${cmd.slice(0, 100)}\n     ↳ ${gate.reason}；改法=换成真跑产物的行为型判据（读运行时读数/真实副作用），或改挂 人判:，或换一条独立通道的判据`)
+    }
+  }
+  return { block: notes.length > 0, notes, details }
+}
+
+export async function trySettleGroups(s, steps, userSigns, cwd = process.cwd()) {
+  const notes = []
+  // v0.8.31 支付通道：本拍真人签收帧即付（组名精确或「全部」）——签了字的欠据不再阻塞归零
+  s = payIOU(s, userSigns)
   for (const g of s.groups) {
     if (g.settled || !g.closeRequested) continue
     const acts = s.closed.filter((c) => c.group === g.title)
@@ -265,6 +355,13 @@ export function trySettleGroups(s, steps, userSigns, cwd = process.cwd()) {
       const sig = userSigns || new Set()
       if (!sig.has(g.title) && !sig.has('全部')) { notes.push(`组「${g.title}」user 门未过：需导演真发「签收 ${g.title}」（或「签收全部」）——模型自写签收在此撞墙（帧判类只认 rpcId 真人面）`); continue }
     }
+    // v0.8.30 判据可证伪门（落账前）：把写入面产物替换成负对照再跑判据——判据若照样绿，它是空的，不许落账。
+    //   位置刻意在实跑 cmd 判据**之前**：先证明这把尺子有刻度，再看它读数。
+    const fb = await falsifyBlock(g.accept, { writeSet: s.writeSet, cwd })
+    if (fb.block) {
+      notes.push(`组「${g.title}」判据不可证伪，不落账：\n${fb.notes.map((n) => '  ✗ ' + n).join('\n')}`)
+      continue
+    }
     // v0.5.8 组判据挂账：cmd: 项落账时实跑（红=不落账）；人判: 项入落账回执（可见，供审计）
     // v0.6.24 三态分类（b7462c70 案底）：broken（跑不了）与 red（判据红）显式区分，不混同
     const cmdFails = [], honorNotes = []
@@ -273,20 +370,29 @@ export function trySettleGroups(s, steps, userSigns, cwd = process.cwd()) {
       if (ax.startsWith('cmd:')) {
         let cmd
         try { cmd = parseAcceptCmd(ax) } catch (e) { cmdFails.push('形态坏：' + e.message); continue }
-        try { execCmdSync(cmd, { timeout: judgeTimeoutMs(), cwd }) }
+        try { await execCmdAsync(cmd, { timeout: judgeTimeoutMs(), cwd }) }
         catch (e) {
           const k = classifyCmdError(e)
           cmdFails.push(k.state === 'broken'
             ? '跑不了（命令坏，非结论红——修形态：注释入人判项/绝对路径后重跑）: ' + k.err
             : k.state === 'pending'
               ? '跑不了（物料未就位：判据目标本应在本步创建——未创建=不落账）: ' + k.err
-              : '判据红（exit≠0，条件未满足）: ' + k.err)
+              : '判据红（exit≠0，条件未满足）: ' + k.err + '（cwd=' + cwd + '）')
         }
       } else if (ax.startsWith('人判:')) honorNotes.push(ax.slice(3).trim())
     }
     if (cmdFails.length) { notes.push(`组「${g.title}」判据未全绿，不落账：\n${cmdFails.map((f) => '  ✗ ' + f).join('\n')}`); continue }
     const r = markGroupSettled(s, g.title, 'mechanical-settle')
-    if (r.ok) { s = r.state; notes.push(`组「${g.title}」落账 ✓（动作×${acts.length}，栈闭合齐${g.verify === 'redteam' ? '，审全 pass' : ''}${(g.accept || []).filter((x) => String(x).startsWith('cmd:')).length ? '，cmd 判据全绿' : ''}${honorNotes.length ? `；人判挂账：${honorNotes.join('；')}（未机械验证，审计可追）` : ''}）`) }
+    if (r.ok) {
+      s = r.state
+      // v0.8.31 欠据：人判项登记为欠据（不再当"挂账"放行）——未付欠据阻止终端归零。
+      //  口径改动的原因（池核案底）：机器看不见的项恰恰决定质量，挂账=可放行的放过。
+      if (honorNotes.length) s = recordIOU(s, g.title, honorNotes)
+      const iouLine = honorNotes.length
+        ? `；⏳ 人判欠据 ${honorNotes.length} 条（待开发者签收——回「签收 ${g.title}」或「签收全部」）：${honorNotes.join('；')}`
+        : ''
+      notes.push(`组「${g.title}」落账 ✓（动作×${acts.length}，栈闭合齐${g.verify === 'redteam' ? '，审全 pass' : ''}${(g.accept || []).filter((x) => String(x).startsWith('cmd:')).length ? '，cmd 判据全绿' : ''}${iouLine}）`)
+    }
   }
   if (allGroupsSettled(s) && s.stage !== 'final') { s = { ...s, stage: 'final' }; notes.push('全组落账 → 终端校验态：terminal_check 出归零报告。') }
   return { state: s, notes }
@@ -435,6 +541,18 @@ for (const g of groups) {
   }
 }
         if (bad.length) throw new Error(`组「${g.title}」accept 前缀闸：每条判据须「cmd:<可跑命令>」（落账时实跑，红=不落账）或「人判:<内容>」（落账回执挂账可见，供审计）——裸判据=可空转（体感实测案底）`)
+      }
+      // v0.8.30 判据可证伪门（合同期早警）：写入面已有产物时，当场把产物替换成负对照再跑判据——
+      //   空转判据（判据被字符串本身满足）在写合同的当天就拒收，而不是等落账时才拦。
+      //   无产物=不拦（判据目标尚未创建），落账门会再拦一次。
+      {
+        const accepts = groups.flatMap((g) => g.accept || [])
+        const fb = await falsifyBlock(accepts, { writeSet: s.writeSet, cwd: sessionCwd(exec) })
+        if (fb.block) {
+          for (const n of fb.notes) { try { recordLesson('vacuous-judge', n.slice(0, 120), 'tools:decompose', undefined, sid) } catch { /* 教训记账失败不阻断拒收 */ } }
+          throw new Error('【判据空转】负对照仍绿=这条判据能被假货满足（不是尺子，是摆设）：\n' + fb.notes.map((n) => '  ✗ ' + n).join('\n')
+            + '\n负对照=把本会话写入面的产物换成「字面壳（只含判据要匹配的字符串）/空转壳（结构合法但什么都不做）」再跑你的判据。')
+        }
       }
       // v0.5.12 引导体系v2 自主档驱动行为（敢走开第一落地）：T≥2 时 verify=user 自动降级 self（可回退——降档即收回）
       const rankT0 = (s.rank && s.rank.T) || 0
@@ -679,6 +797,13 @@ export function optimalDeclareDefinition() {
         notes = m.notes
       }
       contract.ticketBand = controlSurface(s).residual.lastBand || null // r48 定界：闸只看本票合同内权威档
+      // v0.8.36 债闸：已升级的债（猜错过）只能用世界还——同 claimKey 的非实证来源直拒（第一次猜放行）
+      const _dg = refuseGuess(s.debts || [], contract.predictions || [])
+      if (_dg.refuse) {
+        noteFriction(sid, 'declare', 'world-debt')
+        onDeclareReject({ reason: 'world-debt' })
+        throw new Error(`这笔债只能用世界还：${_dg.items.map((x) => x.key).join('、')}——去拿实证（还债优先级 ${cheapestRepay()}）`)
+      }
       const r = declareStep(sid, contract)
       if (!r.ok) {
         noteFriction(sid, 'declare', r.error)
@@ -694,8 +819,20 @@ export function optimalDeclareDefinition() {
             }
           } catch { /* 索取单落盘失败不阻断拒回执 */ }
         }
+        // v0.8.37 诚信留痕：伪造测量/冒充证据=硬边界违规（落盘提交开发者）
+        if (/探针台账缺 key|伪造|冒充/.test(r.error || '')) { try { recordTrust({ sid, kind: 'violation', detail: String(r.error).slice(0, 200) }) } catch { /* 留痕失败不阻断拒回执 */ } }
         throw new Error(r.error + (/来源纪律/.test(r.error || '') ? `\n⏳ 索取单已挂账（缺料清单落盘，后续回执续追）` : ''))
       }
+      // v0.8.36 债账：非实证来源建债；带实证来源的断言清偿同 claimKey 旧债（债由「拿到的东西」还）
+      try {
+        const sd0 = loadState(sid)
+        if (sd0 && sd0.stage !== 'off') {
+          let db = recordDebts(sd0.debts || [], r.step.predictions, Date.now())
+          const evid = (r.step.predictions || []).filter((p) => isEvidential(p && p.source))
+          if (evid.length) db = dischargeDebts(db, evid.map((p) => p.key), sourceKind(evid[0].source))
+          saveState(sid, { ...sd0, debts: db })
+        }
+      } catch { /* 债账失败不阻断声明 */ }
       // 索取单解决位：declare 通过=料齐了，销单并在回执记数（不静默）
       let demandNote = ''
       try {
@@ -710,6 +847,9 @@ export function optimalDeclareDefinition() {
       const veNote = r.step.vExpectSource === 'derived' ? `\nvExpect=${r.step.vExpect}（未填→引擎按当前档推导；想改判就显式写，写错仍拒）` : `\nvExpect=${r.step.vExpect}（显式声明）`
       const ss = r.sourceStats || { read: 0, probe: 0, prior: 0, engram: 0 }
       const srcLine = `来源：read×${ss.read} probe×${ss.probe} engram×${ss.engram || 0} prior×${ss.prior}` + (ss.prior > 0 ? `（⚠ 显式先验×${ss.prior}：诚实先验可引，预言失效风险自负——能升 read:/probe:/engram: 就升）` : '') + ((r.sourceHits || []).length ? `\n${r.sourceHits.join('\n')}` : '')
+      // v0.8.36 债读数：非实证断言=欠世界的债（无债零注入）
+      let debtNote = ''
+      try { const _dl = debtLine(loadState(sid)?.debts || []); if (_dl) debtNote = '\n' + _dl } catch { /* 债账不可读=零注入 */ }
       // v0.4.3 口径对齐辅助（引 probe: 时现场出示台账证据——引用时刻即核对时刻，防上下文漂移后抄错键/错位值）
       const probeEvi = []
       for (const p of r.step.predictions) {
@@ -743,7 +883,7 @@ export function optimalDeclareDefinition() {
         bindActualAction({ taskState, actionKind: 'declare', actionTitle: r.step.title })
       } catch { /* 归因账故障不影响真实 declare */ }
       return { ok: true, text: (auto ? `✅ 已自动立项（声明即合同）：承诺 ${(s.cost.assertions || []).length} 条。
-` : '') + `✅ 动作「${r.step.title}」已声明（open·准入=${admission}）。预测 ${r.step.predictions.length}、通道 ${r.step.measure.channels.length}、law ${r.step.law.length}（含基行）、beforeBand=${controlSurface(s).residual.lastBand || 'far'}（引擎直读）。${srcLine}${demandNote}${notes.length ? '\n' + notes.join('\n') : ''}${eviLine}${lowNote}${dipNote}${maintainNote}${veNote}${masterLine}\n${nf}` }
+` : '') + `✅ 动作「${r.step.title}」已声明（open·准入=${admission}）。预测 ${r.step.predictions.length}、通道 ${r.step.measure.channels.length}、law ${r.step.law.length}（含基行）、beforeBand=${controlSurface(s).residual.lastBand || 'far'}（引擎直读）。${srcLine}${debtNote}${demandNote}${notes.length ? '\n' + notes.join('\n') : ''}${eviLine}${lowNote}${dipNote}${maintainNote}${veNote}${masterLine}\n${nf}` }
     },
   }
 }
@@ -761,6 +901,8 @@ export function optimalConvergeDefinition() {
         group: { type: 'string', description: '本动作归属组（recordClosed 口径）' },
         closeGroup: { type: 'boolean', description: '该组由本动作收尾（触发机械落账门）' },
         dv: { type: 'object', additionalProperties: false, required: ['beforeBand', 'measuredBand', 'channels'], properties: { beforeBand: { type: 'string', enum: ['far', 'near', 'at'] }, measuredBand: { type: 'string', enum: ['far', 'near', 'at'] }, channels: { type: 'array', items: { type: 'string' } } } },
+        disposition: { type: 'string', enum: ['continue', 'turn', 'repair', 'stop'], description: '偏差处置（自评，v0.8.37）：continue=继续 / turn=拐弯 / repair=下一步修 / stop=暂停；有偏差时必须给——偏差是观察不是判决，处置权在你' },
+        reason: { type: 'string', description: '处置理由（一句话，记入账本）' },
       },
     },
     output: OUT,
@@ -787,8 +929,18 @@ export function optimalConvergeDefinition() {
           }
         }
       } catch { /* 裁判层故障=正则保底 */ }
-      const r = convergeStep(sid, args || {})
+      const r = convergeStep(sid, { ...(args || {}), selfScore: true })
       if (!r.ok) { noteFriction(sid, 'converge', r.error); onConvergeReject({ reason: String(r.error || '').slice(0, 60) }); throw new Error(r.error) }
+      // v0.8.36 债的清偿与升级：吻合/带实证→清偿；失配→升级（这笔债只能用世界还）
+      try {
+        const sd = loadState(sid)
+        if (sd && sd.stage !== 'off' && Array.isArray(sd.debts) && sd.debts.length) {
+          const keys = (r.step.predictions || []).map((p) => p.key)
+          // v0.8.37：有偏差=这批断言没被测量兑现 → 债升级（与是否闭合无关）；无偏差=清偿
+          if ((r.step.deviations && r.step.deviations.length) || (r.step.discrepancies && r.step.discrepancies.length)) saveState(sid, { ...sd, debts: escalateDebts(sd.debts, keys) })
+          else if (r.step.status === 'closed') saveState(sid, { ...sd, debts: dischargeDebts(sd.debts, keys, 'measure') })
+        }
+      } catch { /* 债账失败不阻断对账 */ }
       if (r.step.status !== 'closed') {
         const list = (r.step.discrepancies || []).map((x) => '  ✗ ' + x).join('\n')
         // v0.5.0 档位即时降（风险不对称：声称被测量证伪=装完成案底，直降 T0 不隔夜）
@@ -825,7 +977,7 @@ export function optimalConvergeDefinition() {
         if (tgt) { tgt.closeRequested = true; notes.push(`组「${gTitle}」请求落账`) }
         // v0.8.15 漏传 cwd 案底：此处曾走 trySettleGroups 的默认 process.cwd()（宿主目录），
         // 判据里的相对路径必然落到 C:\Users\Administrator —— 与 terminal_check 的调用点不一致。
-        const tr = trySettleGroups(s, loadStack(sid).steps, await extractSigns(exec), sessionCwd(exec))
+        const tr = await trySettleGroups(s, loadStack(sid).steps, await extractSigns(exec), sessionCwd(exec))
         s = tr.state
         notes.push(...tr.notes)
       }
@@ -833,6 +985,7 @@ export function optimalConvergeDefinition() {
       claimGuidance(sid, { terminal: s.stage === 'final' }) // 回执含残差+下一步指引：认领之，注入不再重复
       const surf = controlSurface(s)
       const head = `✅ 动作「${r.step.title}」closed（吻合 ${r.step.agreed.length} + ΔV ${r.step.dv.before}→${r.step.dv.after}）= 账面锚点 · 剩余未落账组=${surf.residual.groupsOpen.length}·已闭=${surf.residual.closedCount}`
+      const dispLine = dispositionLine((r.step.deviations || []).length, r.step.disposition && r.step.disposition.call, r.step.disposition && r.step.disposition.reason)
       const vLine = vr ? `📏 实测计分=${vr.V}（已测断言 ${vr.green}/${vr.total}·z=[${vr.zs.join(', ')}]${vr.errs && vr.errs.length ? `·⚠ 读数失败诊断: ${vr.errs.join(' | ')}` : ''}——未测投影不入 V，output feedback 诚实位）` : ''
       let devLn = ''
       try { devLn = deviationLine(r.step) } catch { /* 偏差不可算=零注入 */ }
@@ -855,7 +1008,7 @@ export function optimalConvergeDefinition() {
         if (cc2 && typeof cc2.C === 'number') { const gap = Math.max(0, 45 - cc2.C); rankProg = `\n📈 档位进度：样本 ${cc2.n || 0}/8 · C=${cc2.C} · 距 T1 线（C≥45）${gap ? `差 ${gap}` : '已达标'}（再犯罚已含）${cc2.slips ? `；措辞层回炉 ${cc2.slips} 不计信誉` : ''}` }
       } catch { }
       onConvergeSuccess({ step: r.step.title, dv: r.step.dv ? `${r.step.dv.before}→${r.step.dv.after}` : 'n/a' })
-      return { ok: true, text: [head, vLine, devLn, rankProg, closeHint, briefNote, notes.join('\n'), s.stage === 'final' ? '全链落账 → terminal_check 归零。' : ''].filter(Boolean).join('\n') }
+      return { ok: true, text: [head, dispLine, vLine, devLn, rankProg, closeHint, briefNote, notes.join('\n'), s.stage === 'final' ? '全链落账 → terminal_check 归零。' : ''].filter(Boolean).join('\n') }
     },
   }
 }
@@ -886,7 +1039,7 @@ export function auditRecordDefinition(name = 'audit_record') {
       let s2 = rec.state
       const notes = [`审落账：「${args.title}」verdict=${p.verdict.verdict}（rounds=${s2.closed.find((c) => c.title === args.title)?.audit?.rounds}）`]
       if (p.verdict.verdict === 'reject') notes.push('打回义务：修复后**再审**（新引文），过审前该组落账门不开。')
-      const tr = trySettleGroups(s2, loadStack(sid).steps, await extractSigns(exec), sessionCwd(exec))
+      const tr = await trySettleGroups(s2, loadStack(sid).steps, await extractSigns(exec), sessionCwd(exec))
       s2 = tr.state
       notes.push(...tr.notes)
       saveState(sid, s2)
@@ -1056,6 +1209,8 @@ export function terminalCheckDefinition() {
     async execute(_args, exec) {
       const sid = sidOf(exec)
       let s = mustState(sid) // v0.5.0 案底修：档位评估需回写 s，const 重赋值=TypeError（E2E 抓，catch 曾吞成"评估异常"）
+      // v0.8.31 支付通道：终检时先把本会话真人签收帧入账（「签收 <组名>」/「签收全部」）
+      s = payIOU(s, await extractSigns(exec))
       const enterRank = s.rank // 进场档位：本单规则（归档/面板/自动放行）由开环时的信任档决定，与 verify 降级口径一致
       const rep = terminalCheck(s.cost, loadStack(sid), s, s.stage)
       // v0.5.0 档位器官：单末评估（C 从盘账复算非自评；滞回升降；碎拍冻结；T3 提示位）
@@ -1074,6 +1229,8 @@ export function terminalCheckDefinition() {
         : `⚠ 终端未归零（交处置）：未落账组=${rep.unsettledGroups.join('、') || '无'}；未闭动作=${rep.openSteps.join('、') || '无'}；dip=${rep.dipPending}`
       // v0.6.35 摩擦账本实况行（隐形税首次可测——终检时读一手读数；v0.6.36 修：head 须 let——const 重赋值被 try 吞=账实不符案底）
       try { const fl = frictionLine(sid); if (fl) head = head + '\n' + fl } catch { /* 账本不可读=零注入 */ }
+      // v0.8.37 诚信台账（开发者可见）：伪造/绕过/误判落盘并在归零回执汇总
+      try { const ts = trustSummary({ sid }); if (ts) head = head + '\n' + ts } catch { /* 台账不可读=零注入 */ }
       // v0.7.0 闸接线：归零→progress 闸正效果 + 质量账本自动记录
       if (rep.zero) { try { onTerminalZero({ s, stack: loadStack(sid), frictionSummary: frictionSummary(sid), sid }) } catch { /* 闸记录失败不影响归零 */ } }
       // v0.4.6 环铸记忆写路径：归零即出蒸馏草稿；r29 学习含量门（判定住 pricing-organ）：仪式单免提
@@ -1115,8 +1272,23 @@ export function terminalCheckDefinition() {
       })()
       const archiveNote = (enterRank && enterRank.T >= 2) ? '\n✅ 已自动归档（T2：导演可回望，无需签收）' : ''
       const panelLine = '\n🎛 导演面板：档位 T' + ((enterRank && enterRank.T) || 0) + '·能力 ' + readAbilities().length + ' 单·抽审 ' + ((s.groups || []).filter((g) => g && g.auditSampled).length) + ' 组'
-      const honorLine = '\n未机械验证：' + ((s.groups || []).reduce((n, g) => n + ((g.accept || []).filter((x) => String(x).startsWith('人判:')).length), 0)) + ' 项（人判判据挂账可审计）'
-      return { ok: true, text: head + `\n目的：${cut(rep.purpose, 60)}` + archiveNote + panelLine + honorLine + rankNote + stampNote + priceNote + (draft ? `\n\n${draft}` : '') }
+      const honorLine = (() => {
+        // v0.8.31 口径换血：人判项=欠据（必须真人签收），不再是"挂账可审计"（池核案底）
+        const open = (rep.openIOU || [])
+        const total = (s.groups || []).reduce((n, g) => n + ((g.accept || []).filter((x) => String(x).startsWith('人判:')).length), 0)
+        if (total === 0) return ''
+        if (open.length === 0) return `\n✅ 人判欠据 ${total} 条已由开发者签收（可追：state.iou.paidAt）`
+        return `\n⏳ 未归零：${open.length} 条人判欠据待开发者签收——机器部分已齐，人判部分不许自认通过：\n`
+          + open.map((e) => `  · [${e.group}] ${cut(e.text, 70)}`).join('\n')
+          + `\n  付清方式：回「签收全部」或「签收 <组名>」（真人帧；模型自写不算）`
+      })()
+      const head2 = (() => {
+        const open = (rep.openIOU || [])
+        if (rep.zero || open.length === 0) return head
+        if (rep.unsettledGroups.length || rep.openSteps.length || rep.dipPending) return head
+        return `⏸ 未归零：${open.length} 条人判欠据待开发者签收（机器部分已齐）`
+      })()
+      return { ok: true, text: head2 + `\n目的：${cut(rep.purpose, 60)}` + archiveNote + panelLine + honorLine + rankNote + stampNote + priceNote + (draft ? `\n\n${draft}` : '') }
     },
   }
 }
