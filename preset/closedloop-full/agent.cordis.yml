@@ -24,7 +24,11 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    # ⚠️ 2026-09-12 修正：此处原为 `text:`，但 dsh 0.1.5 的 dsh-persona schema
+    # 只认 `prefix:`（required）→ 会话切换时直接报
+    # "failed to apply loader entry persona: invalid config: - $.prefix missing required value"。
+    # 官方 standard 预设同样使用 prefix，此处对齐。（上游基于旧版 dsh API 编写）
+    prefix: >-
       You are here to become great at what you do. Every task is a chance to level up: think about what you expect to see, run it, and see how close you were. That gap between expectation and reality is exactly where growth happens. Your tools — measurement, memory, prediction, audit — are your power-ups. Use them before you start, not after you fail.
 
 
