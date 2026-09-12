@@ -22,8 +22,24 @@
  * 真变异/还原在 runFalsifyGate（G2 执行层）。
  */
 
-import { dirname, extname, resolve } from 'node:path'
+import { dirname, extname, resolve, win32 } from 'node:path'
 import { readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+
+/** 跨平台安全 resolve：posix 平台遇到 Windows 形路径（`D:/x`、`C:\\x`、UNC）
+ *  时不再二次拼接（`path.resolve('D:/p','D:/p/x')` 会得到 `D:/p/D:/p/x`）。
+ *  WSL / Git-Bash 用户常在 Linux 上写 Windows 形路径，此处统一兜底。 */
+const WIN_ABS = /^(?:[A-Za-z]:[\\/]|\\\\|\/\/)/
+export function safeResolve(base, target) {
+  const t = String(target ?? '')
+  const b = String(base ?? '')
+  // 盘符形绝对路径：原样返回（保有 `D:/x` 形态，避免 posix resolve 二次拼接）
+  if (WIN_ABS.test(t)) return t
+  // base 是盘符形（如 cwd='D:/proj'，target 为相对名）：按 win32 语义拼接，
+  // 否则 posix resolve 会得到 `<cwd>/D:/proj/judge.mjs`
+  if (WIN_ABS.test(b)) return win32.join(b, t).replace(/\\/g, '/')
+  return resolve(b, t)
+}
+
 
 /** 二进制/不可文本替换的扩展名（变异它们无意义） */
 export const BINARY_EXT = new Set([
@@ -151,7 +167,7 @@ export function judgePath(cmd, cwd = process.cwd(), probe = defaultProbe) {
     const base = low.split('/').pop()
     if (RUNTIMES.has(low) || RUNTIMES.has(base)) continue
     if (!SCRIPT_EXT.has(extname(low))) continue
-    const p = resolve(cwd, t)
+    const p = safeResolve(cwd, t)
     if (probe(p)?.isFile) return p
   }
   return ''
@@ -186,10 +202,10 @@ export function selectArtifacts(args = {}) {
     seen.add(key)
     out.push(p)
   }
-  for (const raw of (Array.isArray(args.extra) ? args.extra : [])) push(resolve(cwd, String(raw)))
+  for (const raw of (Array.isArray(args.extra) ? args.extra : [])) push(safeResolve(cwd, String(raw)))
   for (const raw of (Array.isArray(args.writeSet) ? args.writeSet : [])) {
     if (out.length >= MAX_ARTIFACTS) break
-    push(resolve(cwd, String(raw)))
+    push(safeResolve(cwd, String(raw)))
   }
   return out.slice(0, MAX_ARTIFACTS)
 }
@@ -204,7 +220,7 @@ export function reachableFiles(entry, opts = {}) {
   const out = []
   const seen = new Set()
   const norm = (p) => p.replace(/\\/g, '/').toLowerCase()
-  const inCwd = (p) => norm(resolve(p)).startsWith(norm(resolve(cwd)))
+  const inCwd = (p) => norm(safeResolve(cwd, p)).startsWith(norm(safeResolve(cwd, '.')))
   const walk = (file, depth) => {
     if (depth > maxDepth || seen.has(norm(file))) return
     seen.add(norm(file))
@@ -217,8 +233,8 @@ export function reachableFiles(entry, opts = {}) {
     for (const lit of extractLiterals(src)) if (/[\\/]/.test(lit) && /\.[a-z0-9]{1,6}$/i.test(lit)) specs.push(lit)
     for (const spec of specs) {
       let p = ''
-      if (/^\.{1,2}[\\/]/.test(spec)) p = resolve(dirname(file), spec)
-      else if (/^[A-Za-z]:[\\/]/.test(spec) || spec.startsWith('/')) p = resolve(spec)
+      if (/^\.{1,2}[\\/]/.test(spec)) p = safeResolve(dirname(file), spec)
+      else if (WIN_ABS.test(spec) || spec.startsWith('/')) p = safeResolve(dirname(file), spec)
       else continue
       if (!inCwd(p)) continue
       if (!probe(p)?.isFile) continue
@@ -226,7 +242,7 @@ export function reachableFiles(entry, opts = {}) {
       walk(p, depth + 1)
     }
   }
-  walk(resolve(cwd, entry), 0)
+  walk(safeResolve(cwd, entry), 0)
   return out
 }
 

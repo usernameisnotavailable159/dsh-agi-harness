@@ -23,7 +23,9 @@ function settleState(accept) {
   return { ...r.state, stage: 'rolling', weightsLocked: true, closed: [{ title: 'A', group: 'G', at: Date.now() }] }
 }
 const STEPS = [{ title: 'A', status: 'closed' }]
-const CMD = 'cmd: node --test D:/dsh/dsh-closedloop-mode/tests/iou-settle.test.mjs'
+// 平台中立：用真实存在的脚本作为 cmd 判据（原用例硬编码 Windows 盘符路径，
+// 在 Linux/WSL 上必然 ENOENT → 假失败）。node -e 退出码即判据读数。
+const CMD = 'cmd: node -e "process.exit(0)"'
 const HUMAN = '人判: 开发者目测：池核美学与尺度'
 
 test('s1 纯 cmd 组落账 ⇒ 不产欠据', async () => {

@@ -136,7 +136,12 @@ function engramNode(title) {
   // 单认 DSH_HOME 判"无节点"，两侧存储错位）。候选目录全扫，同名取最后一条（全量重写式存储：末行最新）。
   const cands = []
   if (process.env.DSH_HOME) cands.push(join(process.env.DSH_HOME, 'engram-relay', 'engrams.jsonl'))
-  try { cands.push(join(homedir(), '.dsh', 'engram-relay', 'engrams.jsonl')) } catch { /* homedir 不可用只留 DSH_HOME 候选 */ }
+  // 用户主目录：优先 USERPROFILE（Windows/WSL 互操作场景，os.homedir() 在 posix 上不看它），
+  // 回退 os.homedir()。测试用 USERPROFILE 钉住第二候选做隔离，此处必须尊重它。
+  try {
+    const userHome = process.env.USERPROFILE || homedir()
+    cands.push(join(userHome, '.dsh', 'engram-relay', 'engrams.jsonl'))
+  } catch { /* homedir 不可用只留 DSH_HOME 候选 */ }
   const seen = new Set()
   let found = null
   for (const p of cands) {
