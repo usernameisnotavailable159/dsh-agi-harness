@@ -33,7 +33,7 @@ import { EngramWakeEngine, type WakeViewer } from './engram/wake.js'
 import { RelayModel } from './model/relay-model.js'
 import { installGraphApi } from './graph-api.js'
 import { LingshuSupervisor } from './lingshu-supervisor.js'
-import { decideInjection, alreadyPresent, skipReasonText } from './inject-guard.js'
+import { decideInjection, alreadyPresent, skipReasonText, buildPreStepInjectionMessage } from './inject-guard.js'
 import { VerifyCache } from './verify-cache.js'
 import { ENGRAM_LAYERS, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
 import type { EngramRelayConfig, VerifyMark } from './types.js'
@@ -469,6 +469,16 @@ export class EngramRelay {
     //     pre-step 的 decision.messages 可变、且作为 durable user/message 落盘——
     //     与 DSH 自己的 "Current runtime context" 同一机制（不碰冻结请求、不破前缀缓存）。
     //     去重：与 llm/stream 路径共用 alreadyPresent（同一记忆段不重复注入）。
+    //
+    //     ⚠️ 注入消息**必须**带 id + source（2026-09-12 生产事故案底，本机 4/4 命中）：
+    //     旧实现手写裸对象 `{role:'user', content:[...]}`，缺 source。pre-step 瀑布链
+    //     下游的官方监听器（repeat-tool-reminder:1510 / tool-skill invokedSkillNames /
+    //     session-reference prepareDirectMessages / agent-loop RuntimeContextProjection）
+    //     无保护地读 `message.source.kind`，当场抛
+    //     `Cannot read properties of undefined (reading 'kind')` → preStep 抛出
+    //     → 整轮 turn/end{kind:'error'}（用户可见"本轮运行失败"且消息发不出去）。
+    //     改走 buildPreStepInjectionMessage()：契约单点，回归测试见
+    //     tests/pre-step-message-contract.test.mjs（含负对照）。
     this.disposers.push(this.ctx.on('agent/pre-step', async (_payload, next) => {
       const decision = await next()
       try {
@@ -479,7 +489,10 @@ export class EngramRelay {
         const injection = this.renderMemorySection()
         if (!injection) return decision
         if (alreadyPresent(msgs.slice(-3), injection)) return decision
-        return { ...(decision as object), messages: [...msgs, { role: 'user', content: [{ type: 'text', text: injection }] }] } as never
+        const message = buildPreStepInjectionMessage(injection, { plugin: 'dsh-engram-relay', name: 'engram:relay' })
+        // 渲染为空 ⇒ 不注入（契约构造器返回 undefined），绝不追加裸消息
+        if (message === undefined) return decision
+        return { ...(decision as object), messages: [...msgs, message] } as never
       } catch (error) {
         this.noteInjectionFailure(error)
         return decision

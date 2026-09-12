@@ -20,11 +20,12 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type { Browser, BrowserContext, CDPSession, ConsoleMessage, Dialog, Download, Page } from 'playwright-core'
 
-let chromiumLoader: Promise<typeof import('playwright-core').chromium> | null = null
+type ChromiumLauncher = NonNullable<typeof import('playwright-core').chromium>
+let chromiumLoader: Promise<ChromiumLauncher> | null = null
 
 /** Lazy-load Playwright so unsupported platforms (e.g. Android) can still
  *  load the plugin itself; only browser_* tool calls fail with a clear error. */
-async function getChromium(): Promise<typeof import('playwright-core').chromium> {
+async function getChromium(): Promise<ChromiumLauncher> {
   if (!chromiumLoader) {
     chromiumLoader = (async () => {
       // Android/Termux: playwright-core 的 registry 只认 linux/darwin/win32，
@@ -34,7 +35,8 @@ async function getChromium(): Promise<typeof import('playwright-core').chromium>
       if (process.platform === 'android') {
         try { Object.defineProperty(process, 'platform', { value: 'linux', configurable: true }) } catch { /* keep android */ }
       }
-      return import('playwright-core').then((m) => m.chromium)
+      const m = await import('playwright-core')
+      return m.chromium as ChromiumLauncher
     })()
   }
   return chromiumLoader

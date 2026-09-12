@@ -13,7 +13,7 @@
  * the CDP screencast always feeds the active tab.
  * @module @dsh-external/dsh-browser-panel/browser
  */
-import { type CDPSession, type Page } from 'playwright-core';
+import type { CDPSession, Page } from 'playwright-core';
 /** One console message captured from a page. */
 export interface ConsoleEntry {
     readonly type: 'log' | 'error' | 'warn' | 'info' | 'debug';

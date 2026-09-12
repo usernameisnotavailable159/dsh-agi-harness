@@ -64,3 +64,55 @@ export function skipReasonText(why) {
         default: return '记忆段为空';
     }
 }
+
+/**
+ * `agent/pre-step` 注入消息的 source.kind。
+ * 插件注入**永不**冒用 'user'——那是真人帧的判类器（介入率统计、
+ * 写闸的 humanTurnSids、goal 的真人签收门都按 source.kind==='user' 判类）。
+ */
+export const PRE_STEP_SOURCE_KIND = 'plugin';
+/** 稳定唯一的本地消息 id（不 import node:crypto，保持本模块零依赖）。 */
+function localMessageId() {
+    const c = globalThis.crypto;
+    if (c && typeof c.randomUUID === 'function')
+        return `engram-inject-${c.randomUUID()}`;
+    return `engram-inject-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+/**
+ * 构造 `agent/pre-step` 注入消息——**必须**走这里，不要手写裸对象。
+ *
+ * 案底（2026-09-12 生产事故，本机 4/4 命中）：
+ *   旧实现返回 `{ role: 'user', content: [{ type: 'text', text: injection }] }`，
+ *   缺 `id` 与 `source`。pre-step 瀑布链里下游**官方**监听器无保护地读
+ *   `message.source.kind`（dsh-repeat-tool-reminder:1510 / dsh-tool-skill
+ *   invokedSkillNames / dsh-session-reference prepareDirectMessages /
+ *   dsh-agent-loop RuntimeContextProjection.isOwned），当场抛
+ *   `TypeError: Cannot read properties of undefined (reading 'kind')`
+ *   → preStep 抛出 → 整轮 `turn/end{kind:'error'}`，用户看到"本轮运行失败"。
+ *   即便侥幸穿过瀑布链，`dsh-session.assertMessageEventShape` 也会以
+ *   "message has invalid source" 拒收这条落盘事件。
+ *
+ * @param injection 渲染好的记忆段文本（空白 ⇒ 返回 undefined，调用方不注入）
+ * @param opts.plugin 自报的插件名（诊断用）
+ * @param opts.name   注入段来源名（sections 记账用）
+ */
+export function buildPreStepInjectionMessage(injection, opts = {}) {
+    const text = String(injection ?? '');
+    if (text.trim() === '')
+        return undefined;
+    const plugin = typeof opts.plugin === 'string' && opts.plugin !== ''
+        ? opts.plugin
+        : '@dsh-external/dsh-engram-relay';
+    const name = typeof opts.name === 'string' && opts.name !== '' ? opts.name : 'engram:relay';
+    return {
+        id: localMessageId(),
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: {
+            kind: PRE_STEP_SOURCE_KIND,
+            plugin,
+            form: 'snapshot',
+            sections: [{ name, text }],
+        },
+    };
+}

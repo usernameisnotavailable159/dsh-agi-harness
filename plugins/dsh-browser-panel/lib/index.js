@@ -25,9 +25,12 @@ let chromiumLoader = null;
 async function getChromium() {
 	if (!chromiumLoader) chromiumLoader = (async () => {
 		if (process.platform === "android") try {
-			Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: "linux",
+				configurable: true
+			});
 		} catch {}
-		return import("playwright-core").then((m) => m.chromium);
+		return (await import("playwright-core")).chromium;
 	})();
 	return chromiumLoader;
 }
@@ -132,9 +135,18 @@ var BrowserSession = class BrowserSession {
 	async open(profileDir) {
 		if (this.isOpen) return;
 		const chromium = await getChromium();
-		const noProxyArgs = ["--proxy-server=direct://", "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"];
+		const noProxyArgs = [
+			"--proxy-server=direct://",
+			"--no-sandbox",
+			"--disable-setuid-sandbox",
+			"--disable-dev-shm-usage",
+			"--disable-gpu"
+		];
 		const tmpDir = join(homedir(), ".dsh", "browser-panel", "tmp");
-		await mkdir(tmpDir, { recursive: true, mode: 448 }).catch(() => {});
+		await mkdir(tmpDir, {
+			recursive: true,
+			mode: 448
+		}).catch(() => {});
 		const cleanEnv = {
 			TMPDIR: tmpDir,
 			XDG_RUNTIME_DIR: tmpDir
@@ -682,7 +694,8 @@ function ownerSessionId(exec) {
 }
 /** Sanitize a session id into a safe profile directory name. */
 function profileDirFor(sessionId) {
-	return `${PROFILE_ROOT}/${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+	const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+	return `${PROFILE_ROOT}/${safe}`;
 }
 /**
 * Register the browser tools on `ctx.tools`, all backed by one registry.
@@ -759,7 +772,8 @@ function defineTools(registry, options) {
 			},
 			output: TEXT_OUTPUT,
 			async execute(args, exec) {
-				return { text: await snapshotText(await sessionFor(exec), exec, args.delta === true) };
+				const session = await sessionFor(exec);
+				return { text: await snapshotText(session, exec, args.delta === true) };
 			}
 		},
 		{
@@ -1462,7 +1476,8 @@ function renderCssBlock(extraction) {
 //#region src/index.ts
 /** Persistent profile dir for a host-opened session. */
 function profileDirForHost(sessionId) {
-	return join(PROFILE_ROOT, sessionId.replace(/[^a-zA-Z0-9_-]/g, "_"));
+	const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+	return join(PROFILE_ROOT, safe);
 }
 /** Cordis plugin name used by loader diagnostics. */
 const name = "browser-panel";

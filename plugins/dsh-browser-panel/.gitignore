@@ -1,0 +1,13 @@
+# tsc 直出的中间产物（构建时会重新生成，且与上游提交约定不符）。
+# 运行时由 package.json 只解析 lib/index.js（host bundle）、lib/invariant.js、lib/client.js。
+# lib/types/ 是类型声明，按上游约定提交。
+/lib/actions.js
+/lib/browser.js
+/lib/pick.js
+/lib/protocol.js
+/lib/screencast.js
+/lib/snapshot.js
+/lib/tools.js
+/lib/vision.js
+/lib/*.js.map
+!/lib/client.js.map
