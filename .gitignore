@@ -8,3 +8,7 @@ test-results/
 **/fit-plant.mjs
 **/verify-handoff-sync.mjs
 
+
+# ── 项目内临时/产物目录（约定见 ~/tmp/README.md）────────────
+# 放在项目内 ⇒ 在会话工作区内 ⇒ 侧栏预览不被围栏拦（403）
+.tmp/
