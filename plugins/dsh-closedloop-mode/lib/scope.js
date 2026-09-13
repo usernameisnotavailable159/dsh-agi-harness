@@ -52,11 +52,65 @@ export function validateScopeValue(v) {
   return { disabled: [...new Set(v.disabled.map((x) => String(x).trim()))] }
 }
 
+/**
+ * v0.8.40 预设追踪（2026-09-13 实测定因后的修复）
+ *
+ * 案底：dsh 0.1.5 把「当前预设」做成 Session **projection**，不是 session 属性 ——
+ *   `@deepseek-ai/dsh-agent-presets/lib`：`agentPresetProjectionDefinition`
+ *   （key=agentPreset，init=header.agentPreset，apply=`agent-preset/selected` 事件）。
+ *   原实现读 `session?.agentPreset || session?.preset` 永远得到 undefined
+ *   → 一律 fallback 成 `(无预设)`，导致预设作用域**实际失效**：
+ *     · 想关掉 daily/teacher 关不掉（永远匹配不到）
+ *     · 一旦把 `(无预设)` 加进禁用名单 → **所有会话**被静默跳过（本次故障）
+ *
+ * 修法：按会话自己维护预设 —— 在 session/event 钩子里捕获 `agent-preset/selected`
+ *   （实测该事件在 `user/message` **之前**送达，见 2026-09-13 探针日志），
+ *   首次见到会话时用 header 值兜底。
+ */
+const presetBySession = new Map()
+const PRESET_CACHE_MAX = 500
+
+function normalizePreset(v) {
+  const s = typeof v === 'string' ? v.trim() : ''
+  return s || null
+}
+
+/** 记录/更新某会话的当前预设（幂等；由 session/event 与 pre-step 调用）。 */
+export function notePreset(session, event) {
+  const sid = session?.id
+  if (!sid) return
+  const fromEvent = event?.type === 'agent-preset/selected' ? normalizePreset(event?.data?.agentPreset) : null
+  if (fromEvent) {
+    presetBySession.set(sid, fromEvent)
+  } else if (!presetBySession.has(sid)) {
+    const init = normalizePreset(session?.header?.agentPreset)
+      || normalizePreset(session?.agentPreset)
+      || normalizePreset(session?.preset)
+    if (init) presetBySession.set(sid, init)
+  }
+  if (presetBySession.size > PRESET_CACHE_MAX) {
+    for (const k of presetBySession.keys()) {
+      if (presetBySession.size <= PRESET_CACHE_MAX) break
+      presetBySession.delete(k)
+    }
+  }
+}
+
+/** 该会话当前预设：已追踪值优先，其次 header/属性兜底，最后 `(无预设)`。 */
+export function presetOf(session) {
+  const sid = session?.id
+  const tracked = sid ? presetBySession.get(sid) : null
+  return normalizePreset(tracked)
+    || normalizePreset(session?.header?.agentPreset)
+    || normalizePreset(session?.agentPreset)
+    || normalizePreset(session?.preset)
+    || NO_PRESET
+}
+
 /** 判定：名单内=关闭；缺字段/空名单=全开。 */
 export function presetAllowed(session, config) {
   const disabled = Array.isArray(config?.disabled) ? config.disabled : []
-  const p = String(session?.agentPreset || session?.preset || '').trim() || NO_PRESET
-  return !disabled.includes(p)
+  return !disabled.includes(presetOf(session))
 }
 
 const scopeFile = () => join(dshHome(), 'closedloop-scope.json')

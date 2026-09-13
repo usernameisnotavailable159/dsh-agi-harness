@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'cl-scope-')) // 活值文件与预设发现全程临时（真盘零接触）
-import { presetAllowed, effectiveScopeConfig, setLiveScope, validateScopeValue, writeScopeFile, liveScopeFromFile, listPresets, NO_PRESET } from '../src/scope.js'
+import { presetAllowed, presetOf, notePreset, effectiveScopeConfig, setLiveScope, validateScopeValue, writeScopeFile, liveScopeFromFile, listPresets, NO_PRESET } from '../src/scope.js'
 
 test('s1 默认全开：空/缺字段/无配置一律放行（现有用户零变化）', () => {
   assert.equal(presetAllowed({ agentPreset: 'router-standard' }, undefined), true, '无配置=全开')
@@ -56,4 +56,32 @@ test('s6 预设发现：目录内子目录必须被列出（withFileTypes 真断
   const ps = listPresets()
   assert.ok(ps.includes('zz-probe'), `listPresets 必须含临时预设目录，实际=${JSON.stringify(ps)}`)
   assert.equal(ps[0], NO_PRESET, '无预设项仍恒在首位')
+})
+
+test('s6 预设追踪（v0.8.40）：header 兜底 + agent-preset/selected 覆盖，不再一律归 (无预设)', () => {
+  const sid = 'session-track-1'
+  const session = { id: sid, header: { agentPreset: 'router-spec' } }
+
+  // 案底复现：旧实现读 session.agentPreset / session.preset —— 两者皆无 → 归 (无预设)
+  assert.equal(session.agentPreset, undefined, '前提：dsh 0.1.5 的 session 上没有 agentPreset 属性')
+  assert.equal(session.preset, undefined, '前提：也没有 preset 属性')
+  assert.equal(presetOf(session), 'router-spec', 'header.agentPreset 兜底（这正是修复点）')
+
+  // 投影事件（dsh 把当前预设做成 projection）覆盖初始值
+  notePreset(session, { type: 'agent-preset/selected', data: { agentPreset: 'anchored-standard' } })
+  assert.equal(presetOf(session), 'anchored-standard', 'agent-preset/selected 更新为真实预设')
+
+  // 判定必须用"真实预设"
+  assert.equal(presetAllowed(session, { disabled: ['anchored-standard'] }), false, '真实预设命中禁用名单=关')
+  assert.equal(presetAllowed(session, { disabled: ['router-spec'] }), true, '不再用初始 header 值误判')
+  assert.equal(
+    presetAllowed(session, { disabled: [NO_PRESET] }),
+    true,
+    '★★ 回归守护：把 (无预设) 加入禁用名单，**不得**误伤有预设的会话（本次故障根因）',
+  )
+
+  // 兼容：老调用方直接传 { agentPreset } 的形态仍可用；真无预设才归 (无预设)
+  assert.equal(presetOf({ id: 'compat-1', agentPreset: 'daily' }), 'daily', '属性形态兼容')
+  assert.equal(presetOf({ id: 'none-1' }), NO_PRESET, '确实无预设才归 (无预设)')
+  assert.equal(notePreset(undefined, { type: 'agent-preset/selected', data: { agentPreset: 'x' } }), undefined, '无 id 不记录且不抛')
 })

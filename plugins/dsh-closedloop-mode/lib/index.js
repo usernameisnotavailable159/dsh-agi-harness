@@ -52,7 +52,7 @@ import { lqrReadout } from './lqr-organ.js'
 import { getModelFingerprint } from './gate-core.js'
 import { PERSONA } from './persona.js'
 import { claim, release } from './quota-organ.js'
-import { presetAllowed, effectiveScopeConfig, writeScopeFile, setLiveScope, validateScopeValue, listPresets, createScopeMirror, SCOPE_NS } from './scope.js'
+import { presetAllowed, presetOf, notePreset, effectiveScopeConfig, writeScopeFile, setLiveScope, validateScopeValue, listPresets, createScopeMirror, SCOPE_NS } from './scope.js'
 import { stateFace, weightsFace, stepReminder, batchConfirmLine } from './propose-text.js'
 import { offReceipt, VERSION } from './inject-text.js'
 import {
@@ -457,6 +457,8 @@ export function apply(ctx, config) {
   /* ---------- 文本通道触发（@graded / 分级任务:） ---------- */
 
   ctx.on('session/event', (session, event) => {
+    // v0.8.40：先登记预设（`agent-preset/selected` 在 user/message 之前送达），再走任何判定
+    notePreset(session, event)
     if (!session?.id || event?.type !== 'user/message') return
     let txt = ''
     for (const x of (event.data?.content || [])) if (x?.type === 'text') txt += x.text || ''
@@ -472,6 +474,7 @@ export function apply(ctx, config) {
   /* ---------- pre-step：触发 / off / 全段确认-修改扫描（a2 修复主体） / 最小状态面注入 ---------- */
 
   ctx.on('agent/pre-step', async ({ agent, messages }, next) => {
+    notePreset(agent?.session) // v0.8.40：兜底登记（session/event 未覆盖时）
     if (!presetAllowed(agent?.session, effectiveScopeConfig(config))) return next() // v0.8.7 作用域外：零注入零接管（显式 /optimal 命令不受限）
     const sid = agent?.session?.id
     let offJustNow = false
