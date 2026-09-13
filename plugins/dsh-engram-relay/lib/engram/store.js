@@ -85,6 +85,93 @@ export const ENGRAM_LAYERS = ['global', 'project', 'session'];
  * 空 viewer（无 sessionId 且无 cwd）向后兼容全可见（生产路径总传 viewer，
  * 缺省仅测试/直接调用）。
  */
+/**
+ * ── 跨设备项目路径归一化（2026-09-13）─────────────────────────────────────
+ *
+ * 问题：project 层用 `e.projectId === viewer.cwd` 严格比较，但同一项目在不同设备
+ * 上的绝对路径不同：
+ *     PC    /home/hiro/cards
+ *     手机  /data/data/com.termux/files/home/cards
+ * 于是两端的项目记忆互相不可见 —— 学习进度无法跨设备共享。
+ *
+ * 方案（零迁移、向后兼容）：**不改存储，只改比较**。把各设备的 home 前缀替换为
+ * 统一标记 `~` 后比较：
+ *     /home/hiro/cards            → ~/cards
+ *     /data/.../home/cards        → ~/cards     ⇒ 相等 ✅
+ *
+ * 前缀来源（按优先级）：
+ *   1. 环境变量 `ENGRAM_HOME_PREFIXES`（冒号分隔）
+ *   2. `$DSH_HOME/engram-relay/sync-config.json` 的 `homePrefixes`
+ *      （或 $ENGRAM_SYNC_CONFIG 指定的路径）
+ *   3. `os.homedir()` 兜底
+ *
+ * 安全性：只做前缀替换、不改写已存数据；未互相登记前缀的设备之间，行为与改动前
+ * 完全一致（等价于严格比较）。
+ */
+let homePrefixesCache = null;
+function homePrefixes() {
+    if (homePrefixesCache !== null)
+        return homePrefixesCache;
+    const set = new Set();
+    const fromEnv = process.env.ENGRAM_HOME_PREFIXES;
+    if (fromEnv) {
+        for (const p of fromEnv.split(':')) {
+            const t = p.trim().replace(/\/+$/, '');
+            if (t)
+                set.add(t);
+        }
+    }
+    try {
+        const cfgPath = process.env.ENGRAM_SYNC_CONFIG
+            || (process.env.DSH_HOME ? `${process.env.DSH_HOME}/engram-relay/sync-config.json` : '');
+        if (cfgPath && existsSync(cfgPath)) {
+            const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+            if (Array.isArray(cfg.homePrefixes)) {
+                for (const p of cfg.homePrefixes) {
+                    if (typeof p === 'string') {
+                        const t = p.trim().replace(/\/+$/, '');
+                        if (t)
+                            set.add(t);
+                    }
+                }
+            }
+        }
+    }
+    catch { /* 配置缺失/损坏 → 静默降级 */ }
+    try {
+        const os = require('node:os');
+        const h = os.homedir();
+        if (h)
+            set.add(h.replace(/\/+$/, ''));
+    }
+    catch { /* 忽略 */ }
+    homePrefixesCache = [...set].sort((a, b) => b.length - a.length);
+    return homePrefixesCache;
+}
+/** 绝对路径 → `~/...`（不匹配任何已知前缀时原样返回）。 */
+export function normalizeProjectPath(p) {
+    if (typeof p !== 'string' || p === '')
+        return p;
+    if (p === '~' || p.startsWith('~/'))
+        return p;
+    for (const prefix of homePrefixes()) {
+        if (p === prefix)
+            return '~';
+        if (p.startsWith(prefix + '/'))
+            return '~' + p.slice(prefix.length);
+    }
+    return p;
+}
+/** 两个项目路径是否指向同一项目（跨设备归一化比较）。 */
+export function sameProject(a, b) {
+    if (a === null || b === null)
+        return false;
+    if (a === b)
+        return true;
+    return normalizeProjectPath(a) === normalizeProjectPath(b);
+}
+
+
 export function isVisible(e, viewer) {
     if (viewer.sessionId === undefined && viewer.cwd === undefined)
         return true;
@@ -92,7 +179,8 @@ export function isVisible(e, viewer) {
         case 'global':
             return true;
         case 'project':
-            return e.projectId !== null && e.projectId === viewer.cwd;
+            // 跨设备：projectId 与 viewer.cwd 可能是同一项目的不同绝对路径
+            return sameProject(e.projectId, viewer.cwd ?? null);
         case 'session':
             return e.sessionId !== null && e.sessionId === viewer.sessionId;
         default:
@@ -479,7 +567,7 @@ export class EngramStore {
             list = list.filter((e) => e.layer === filter.layer);
         // projectId 只过滤 project 层——global/session 节点（projectId=null）不受影响
         if (filter.projectId !== undefined)
-            list = list.filter((e) => e.layer !== 'project' || e.projectId === filter.projectId);
+            list = list.filter((e) => e.layer !== 'project' || sameProject(e.projectId, filter.projectId));
         if (filter.sessionId !== undefined)
             list = list.filter((e) => e.sessionId === filter.sessionId);
         if (filter.kind !== undefined)
@@ -545,7 +633,7 @@ export class EngramStore {
     }
     /** 清空一个项目（project 层全部节点；项目移除/归档时）。 */
     clearProject(projectId) {
-        const doomed = this.all().filter((e) => e.layer === 'project' && e.projectId === projectId);
+        const doomed = this.all().filter((e) => e.layer === 'project' && sameProject(e.projectId, projectId));
         for (const e of doomed)
             this.remove(e.id);
         return doomed.length;
