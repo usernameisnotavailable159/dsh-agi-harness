@@ -14,7 +14,7 @@
  * 定位：**单次会话上下文增强**——本会话记忆写入、入口唤醒、渐进展开、
  * 因果双向追溯；会话结束即弃（clearSession），不做跨会话沉淀。
  */
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, copyFileSync, readdirSync, appendFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, copyFileSync, readdirSync } from 'node:fs';
 import { basename } from 'node:path';
 /** 进程内写锁（同步标志位）：persist 是同步函数，JS 单线程下同步代码天然不交错；tmp 每实例唯一已防跨实例冲突。 */
 let fileLockHeld = false;
@@ -766,22 +766,7 @@ export class EngramStore {
             }
         }
         this.persist();
-        this.appendTombstone(id);
         return true;
-    }
-
-    /**
-     * 硬删除留痕（墓碑）：跨设备合并时按 id 丢弃，防止被对端活版本复活。
-     * 软删除（engram_retire）走 status=retired 传播；硬删除只能靠墓碑表。
-     * 消费方：~/projects/dsh-memory-sync/bin/memory-sync.sh 的 merge。
-     * 失败不阻断删除（墓碑是增强，不是前置条件）。
-     */
-    appendTombstone(id) {
-        try {
-            appendFileSync(join(this.dir, 'tombstones.jsonl'),
-                JSON.stringify({ id, deletedAt: new Date().toISOString() }) + '\n');
-        }
-        catch { /* 墓碑失败不影响删除 */ }
     }
     /**
      * 会话隔离（分层生命周期）：只清该会话的 **session 层** 临时记忆；

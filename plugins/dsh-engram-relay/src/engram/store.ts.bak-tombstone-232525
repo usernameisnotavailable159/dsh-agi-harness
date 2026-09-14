@@ -15,7 +15,7 @@
  * 因果双向追溯；会话结束即弃（clearSession），不做跨会话沉淀。
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, copyFileSync, readdirSync, appendFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, copyFileSync, readdirSync } from 'node:fs'
 import { basename } from 'node:path'
 /** 进程内写锁（同步标志位）：persist 是同步函数，JS 单线程下同步代码天然不交错；tmp 每实例唯一已防跨实例冲突。 */
 let fileLockHeld = false
@@ -808,26 +808,7 @@ export class EngramStore {
       }
     }
     this.persist()
-    this.appendTombstone(id)
     return true
-  }
-
-  /**
-   * v0.4.x 硬删除留痕（墓碑）：跨设备合并时按 id 丢弃，防止被对端活版本**复活**。
-   * 背景：合并是并集语义 ⇒ 本机 `engram_remove` 删掉的条目，会被设备文件里的
-   * 活版本重新加回来（用户反馈"记忆无法删除"）。软删除（`engram_retire`）走
-   * `status=retired` 传播；硬删除只能靠这张墓碑表。
-   * 消费方：`~/projects/dsh-memory-sync/bin/memory-sync.sh` 的 merge（读同目录
-   * `tombstones.jsonl`，命中即丢弃）。方案见 docs/CLOUD-SYNC-PLAN.md 第四节。
-   * 失败**不阻断**删除 —— 墓碑是增强，不是前置条件。
-   */
-  private appendTombstone(id: string): void {
-    try {
-      appendFileSync(
-        join(this.dir, 'tombstones.jsonl'),
-        JSON.stringify({ id, deletedAt: new Date().toISOString() }) + '\n',
-      )
-    } catch { /* 墓碑写失败不影响删除本身 */ }
   }
 
   /**
