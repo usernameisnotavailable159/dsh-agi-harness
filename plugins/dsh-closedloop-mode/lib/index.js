@@ -179,6 +179,9 @@ export function dampingSignal(s) {
 
 // readAutoConfirm 单一真相已移 mode-state.js（v0.4.1-F1：index 与 tools freeze 共用——授权读取零拷贝）
 
+/** 作用域节告警去重（v0.8.41）：双挂时 'already registered' 只提示一次。 */
+let scopeSectionWarned = false
+
 export function apply(ctx, config) {
   let activeSid = null
   // v0.8.8 设置页作用域节：settings 为硬依赖（声明在 inject 列表→挂载期即满足）。
@@ -199,7 +202,21 @@ export function apply(ctx, config) {
       onChange: () => scopeMirror.onHostChange(),
     })
     scopeMirror.arm()
-  } catch (e) { console.warn('[closedloop] 作用域节注册失败（开关回退文件/配置层）:', String(e?.message || e).slice(0, 80)) }
+  } catch (e) {
+    // v0.8.41 降噪（2026-09-14）：本插件现在会被**挂两次**——
+    //   · host 层：~/.dsh/profiles/web/cordis.patch.yml（提供 scope API / 面板）
+    //   · agent 层：预设 agent.cordis.yml（工具必须在此层才对模型可见）
+    // 第二次注册 settings 命名空间必然撞 "already registered"，属**预期**，
+    // 且插件已优雅降级（开关回退文件/配置层，功能不受影响）。
+    // 因此：该已知良性错误只报**一次**；其它异常照旧每次都报。
+    const msg = String(e?.message || e).slice(0, 120)
+    const benign = /already registered/i.test(msg)
+    if (!benign || !scopeSectionWarned) {
+      scopeSectionWarned = true
+      console.warn('[closedloop] 作用域节注册失败（开关回退文件/配置层）:',
+        msg.slice(0, 80), benign ? '（双挂预期，仅提示一次）' : '')
+    }
+  }
   const offArmed = new Map() // off 双确认窗口（v0.3.1⑥：单条命令误触不清账）
   function backupPersisted(sid) {
     try {
