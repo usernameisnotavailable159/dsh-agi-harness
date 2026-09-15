@@ -12,9 +12,14 @@
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
+import { homedir } from 'node:os'
 
-const SESS = '/home/hiro/.dsh/sessions'
-const OUT = join(process.env.DSH_HOME || '/home/hiro/.dsh', 'closedloop-presets.json')
+// 双端可用：DSH_HOME 优先，其次 ~/.dsh（PC=WSL 与 Termux 都是这个布局）。
+// 案底：初版把 /home/hiro 写死，手机上直接 ENOENT（scandir '/home/hiro/.dsh/sessions'）；
+// 采集设备不同（PC 用 root、手机用 rish），转录目录可能不可读，故 readdirSync 要守卫。
+const HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
+const SESS = join(HOME, 'sessions')
+const OUT = join(HOME, 'closedloop-presets.json')
 const dry = process.argv.includes('--dry-run')
 
 let rec = {}
@@ -22,7 +27,9 @@ try { if (existsSync(OUT)) rec = JSON.parse(readFileSync(OUT, 'utf8')) } catch {
 const before = Object.keys(rec).length
 
 let scanned = 0, withSel = 0, skipped = 0
-for (const proj of readdirSync(SESS)) {
+let projects = []
+try { projects = readdirSync(SESS) } catch { projects = [] } // 目录不存在/不可读=按 0 处理，不抛
+for (const proj of projects) {
   let dirs = []
   try { dirs = readdirSync(join(SESS, proj)) } catch { continue }
   for (const d of dirs) {
@@ -53,5 +60,7 @@ if (!dry) {
   renameSync(tmp, OUT) // 原子替换
   console.log(`已写入 ${OUT}（${statSync(OUT).size} 字节）`)
 }
-const probe = 'session-c948ebf5-27f0-47ff-975f-02064cadecb2'
-console.log(`抽查 ${probe.slice(0, 22)}… → ${rec[probe] ?? '(无记录)'}`)
+// 抽查：取记录里第一条做样例（不写死某个设备的会话 ID——案底：初版写死 PC 的 c948ebf5，手机上恒为(无记录)）
+const sample = Object.entries(rec).slice(0, 3)
+console.log(sample.length ? `抽查 ${sample.length} 条：${sample.map(([k, v]) => `${k.slice(0, 18)}…→${v}`).join('  ')}` : '抽查：记录为空')
+console.log(`输出文件：${OUT}`)
