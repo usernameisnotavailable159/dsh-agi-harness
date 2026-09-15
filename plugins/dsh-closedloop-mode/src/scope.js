@@ -12,7 +12,7 @@
  *  - 案底：惰性 ctx.inject(['settings']) 使 fiber 挂未决依赖→reload 无界等待卡死；
  *    现改硬依赖 + 同步 installSection（宿主服务该命名空间，卡片才派发），reload 秒回。
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -20,6 +20,60 @@ import { dirname, join } from 'node:path'
 export const NO_PRESET = '(无预设)'
 export const SCOPE_NS = 'closedloop'
 const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh')
+
+/**
+ * v0.8.42 会话级预设**持久化**（开发者定向方案 B，2026-09-15）
+ *
+ * 案底：`agent-preset/selected` 只在该次进程送达。新进程里**续跑**的会话，notePreset 只能
+ * 用 `session.header.agentPreset` 兜底，而头里存的是**创建时**预设 ⇒ 用户后切的
+ * daily/teacher 形同不存在，禁用预设被接管。
+ * 实测（2026-09-15 session-c948ebf5-27f0-47ff-975f-02064cadecb2）：
+ *   会话头 router-spec / 选择事件 teacher（在上一进程） ⇒ 当前进程闸按 router-spec 放行，
+ *   21:35:05 注入第一拍并落写闸；而 GET /graded-mode/api/scope 自报 disabled=[daily,teacher]。
+ *
+ * 修法：只把**事件来源**的预设视为权威并落盘（sid→preset，原子替换），新进程先读盘再退 header。
+ * 边界：
+ *  - 从不记录 header 推导值 —— 否则会把"过期值"钉死在盘上；
+ *  - 无记录的会话（真没切过预设）行为与从前完全一致（走 header 兜底）；
+ *  - 磁盘损坏/不可写一律静默回退，不影响判定主链。
+ */
+export const PRESET_RECORD_MAX = 2000
+const presetRecordFile = () => join(dshHome(), 'closedloop-presets.json')
+let presetRecordCache = { mtimeMs: -1, val: {} }
+
+/** 读盘上记录（按 mtime 缓存；缺文件/损坏/非法一律返回 {}，绝不抛）。 */
+export function loadPresetRecord() {
+  try {
+    const f = presetRecordFile()
+    if (!existsSync(f)) return {}
+    const st = statSync(f)
+    if (presetRecordCache.mtimeMs !== st.mtimeMs) {
+      const raw = JSON.parse(readFileSync(f, 'utf8'))
+      const val = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {}
+      presetRecordCache = { mtimeMs: st.mtimeMs, val }
+    }
+    return presetRecordCache.val
+  } catch { return {} }
+}
+
+/** 落盘一条权威记录（先写临时文件再 rename=原子替换，读方永不会看到半截 JSON）。 */
+export function recordPreset(sid, preset) {
+  try {
+    const s = normalizePreset(sid); const p = normalizePreset(preset)
+    if (!s || !p) return false
+    const val = { ...loadPresetRecord() }
+    val[s] = p
+    const keys = Object.keys(val)
+    if (keys.length > PRESET_RECORD_MAX) for (const k of keys.slice(0, keys.length - PRESET_RECORD_MAX)) delete val[k]
+    const f = presetRecordFile()
+    mkdirSync(dirname(f), { recursive: true })
+    const tmp = f + '.tmp-' + process.pid
+    writeFileSync(tmp, JSON.stringify(val))
+    renameSync(tmp, f)
+    presetRecordCache = { mtimeMs: statSync(f).mtimeMs, val }
+    return true
+  } catch { return false }
+}
 
 /** 预设发现（多根合并）：用户 DSH_HOME/.agent-presets + DSH 内置包 presets/。
  *  内置包非本插件依赖，解析失败时按常见全局安装路径兜底（全部 existsSync 守卫，缺了不报错）。 */
@@ -82,8 +136,10 @@ export function notePreset(session, event) {
   const fromEvent = event?.type === 'agent-preset/selected' ? normalizePreset(event?.data?.agentPreset) : null
   if (fromEvent) {
     presetBySession.set(sid, fromEvent)
+    recordPreset(sid, fromEvent) // v0.8.42：只有事件来源才算权威 ⇒ 落盘供新进程续跑时恢复
   } else if (!presetBySession.has(sid)) {
-    const init = normalizePreset(session?.header?.agentPreset)
+    const init = normalizePreset(loadPresetRecord()[sid]) // v0.8.42：盘上记录优先于会话头（头里是创建时值）
+      || normalizePreset(session?.header?.agentPreset)
       || normalizePreset(session?.agentPreset)
       || normalizePreset(session?.preset)
     if (init) presetBySession.set(sid, init)
@@ -96,11 +152,12 @@ export function notePreset(session, event) {
   }
 }
 
-/** 该会话当前预设：已追踪值优先，其次 header/属性兜底，最后 `(无预设)`。 */
+/** 该会话当前预设：已追踪值优先，其次**盘上记录**（v0.8.42，新进程续跑），再 header/属性兜底，最后 `(无预设)`。 */
 export function presetOf(session) {
   const sid = session?.id
   const tracked = sid ? presetBySession.get(sid) : null
   return normalizePreset(tracked)
+    || normalizePreset(sid ? loadPresetRecord()[sid] : null)
     || normalizePreset(session?.header?.agentPreset)
     || normalizePreset(session?.agentPreset)
     || normalizePreset(session?.preset)

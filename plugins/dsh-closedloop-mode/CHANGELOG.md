@@ -1,3 +1,22 @@
+## v0.8.42 — 会话级预设持久化（方案 B）
+
+**案底**：`agent-preset/selected` 只在当次进程送达。新进程里**续跑**的会话，`notePreset` 只能用
+`session.header.agentPreset` 兜底，而头里存的是**创建时**预设 ⇒ 用户后切的 daily/teacher 形同不存在，
+禁用预设被接管。实测 2026-09-15 `session-c948ebf5-…4cadecb2`：头=router-spec / 选=teacher，
+21:35:05 被注入第一拍并落写闸，而同刻 `GET /graded-mode/api/scope` 自报 `disabled=[daily,teacher]`。
+
+**改动**（`src/scope.js`）：
+- 新增 `loadPresetRecord()` / `recordPreset()`：事件来源的预设落盘 `$DSH_HOME/closedloop-presets.json`，
+  临时文件 + `rename` 原子替换，上限 2000 条，缺文件/损坏/不可写一律静默回退；
+- `notePreset`：收到事件时同步落盘；首次见到会话时读取顺序改为「盘上记录 → 会话头 → 投影属性」；
+- `presetOf`：优先序改为「进程内追踪 → 盘上记录 → 会话头 → 投影 → (无预设)」；
+- **header 推导值绝不落盘**（否则过期值被钉死）。
+
+**测试**：新增 `tests/scope-preset-record.test.mjs`（5 项：新进程续跑恢复、header 不遮蔽、损坏回退、
+header 不入盘、盘上写入原子性）；全量 563 项 0 失败。
+
+**运维**：`scripts/backfill-presets.mjs` 一次性回填——扫转录把最后一条 `agent-preset/selected` 写盘补齐历史记录（本机实测：271 份转录 → 119 条），否则修复只对上线后新发生的切换生效。
+
 # Changelog
 
 ## 0.7.7（2026-09-09）学习样本可聚合：粗桶键 + 机械过程标签
