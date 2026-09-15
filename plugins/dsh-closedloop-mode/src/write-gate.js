@@ -5,6 +5,26 @@
  * 自由面（永不闸）：读/搜/探针/测量/终端检查等非写类工具；无闭环盘档的会话（子代理干活）不闸。
  * 接线：index.js 经 ctx.tools.guard 注册（effect 托管，重载即清）；Config.writeGate=false 整闸旁路。
  * 边界（诚实位）：pwsh 侧写文件不闸（测试/构建需跑；二期交 fs-sandbox 策略接）。
+ *
+ * ⚠ 已知缺口（2026-09-15 实测补记 —— **有意保留，不是未发现的 bug**）：
+ *   **bash 等"万能通道"可完全绕过本闸。** 实测（手机 Termux，与 PC 同码）：
+ *       write / edit                             → 被闸
+ *       bash                                     → 放行（免检）
+ *       str_replace_editor                       → 放行
+ *       apply_patch / notebook_edit / multi_edit → 放行
+ *   活案底 session-2f2a5847（手机）：插件注入三件套齐全、模型调用 super_task_completion_mode
+ *   3 次，但 decompose/freeze 0 次（stage 停在 brainstorm、groups=0），**全程用 bash 208 次干活**、
+ *   write/edit 0 次 ⇒ 环未建立而活照干，闸形同未设。
+ *
+ *   这是 SPEC-optimal.md（2026-09-03 九项拍板 C）的**有意取舍**：
+ *     "C 硬 gate 只拦写工具（write/edit/edit_plan 类；pwsh/读观察不拦）"
+ *   理由（同文档待批点 C）：declare 前的读代码/调查属只读；且 bash 同时承担侦察/测量/测试/构建
+ *   —— 闭环自身规定"侦察和测量自由"，按工具名全拦会误伤这条自由。
+ *   原句只承认了 pwsh，**漏记 bash**（实际更常用的绕过通道），本条补齐。
+ *
+ *   二期方向仍为 fs-sandbox 策略层（按"文件系统被写入"这一事实拦，而非按工具名）。
+ *   双端差异（先记下免得二期踩空）：PC 有沙箱（DSH_PERMISSION_MODE=workspace-write）可接；
+ *   **Android/Termux 无沙箱后端**（必须 danger-full-access）⇒ 二期方案在手机上无法直接落地。
  */
 
 /** 写类工具表（登记面可审；扩表=改这里+配测试） */
